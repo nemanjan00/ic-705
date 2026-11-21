@@ -48,6 +48,8 @@ def main():
     ap.add_argument('--release-at', type=float, default=5, help='release POWER (P3_9) after N s')
     ap.add_argument('--adc', default=','.join(['0x300'] * 8), help='RZA1H_ADC_VALS')
     ap.add_argument('--dsfr', default='0')
+    ap.add_argument('--dsp-flash', default=os.path.expanduser('~/icom/out/705E140_full/dsp.image.bin'),
+                    help='SPI-NOR image on RSPI4 (DSP/FPGA config flash)')
     ap.add_argument('--force-on', action='store_true',
                     help='boot hook: force power-mode dispatcher 0x2007B7C0 a1=1 (full bring-up)')
     ap.add_argument('extra', nargs='*')
@@ -62,7 +64,7 @@ def main():
     if a.sd: args += ['-drive', f'if=sd,format=raw,file={a.sd}']
     args += a.extra
     env = dict(os.environ, RZA1H_BOARD='ic705', RZA1H_DEBUG=a.debug, RZA1H_PINS=a.pins,
-               RZA1H_ADC_VALS=a.adc, RZA1H_DSFR=a.dsfr)
+               RZA1H_ADC_VALS=a.adc, RZA1H_DSFR=a.dsfr, RZA1H_RSPI4_FLASH=a.dsp_flash)
     if a.force_on:
         args += ['-S', '-gdb', 'tcp::1240']
     p = subprocess.Popen(args, env=env, stdout=subprocess.DEVNULL, stderr=open(f'{SCR}/qemu705_stderr.log', 'w'))

@@ -23,6 +23,11 @@ Tags: [FW] firmware static · [HW] radio · [VM] emulator · [EXT] outside · [I
   IC-705 flash image builder done (`tools/build_705_flash.py`). **Blocked:** building
   QEMU (`qemu-machine/setup.sh`) needs the owner's approval.
 
+- **Full radio emulated to the UI [VM]:** stock 1.40 firmware boots in QEMU to the drawn
+  480×272 Japanese UI (status bar, splash, text) with sub-CPU, MTU2, ADC, DMAC, RSPI+NOR,
+  GPIO models (`EMULATION.md` "Full-system status"). Gaps: boot hook for power-on, dummy
+  DSP/FPGA → version-error popup, input path unknown.
+
 ## Backups on record
 
 None — no radio access so far; static analysis of `705E140.dat` (MD5 `2c9c1d7f…`).

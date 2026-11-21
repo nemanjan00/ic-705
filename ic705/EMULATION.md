@@ -9,7 +9,7 @@ what the radio does.
 |---|---|---|
 | ARM function-level (call one firmware function, log MMIO) | **working** | `tools/arm_emu.py` (Unicorn 2.1.4) |
 | ARM updater (DSP flash writer) | **working** | `tools/arm_dsp_update_emu.py`: firmware code with HLE for SD read + SPI-NOR model |
-| ARM full-system (boot RTX, UI) | **in progress**: port of the IC-7300 QEMU machine | see "Full-system plan" below |
+| ARM full-system (boot RTX, UI, screen) | **boots to the IC-705 UI** (QEMU, IC-705 port of the IC-7300 machine) | `qemu/`, `tools/qemu705.py`, `tools/run705_gui.py`; see "Full-system status" |
 | DV DSP (C55x) | **working for the modulator** | `tools/c55_emu.py`: interprets the IDA-decoded instruction stream; DSPLIB `fir` is emulated at high level |
 | Main DSP, FPGA | out of reach for now | chip/format not identified |
 
@@ -91,3 +91,48 @@ IC-705 port, deltas to make (static evidence in brackets):
 Status: the QEMU build (`qemu-machine/setup.sh`: clone QEMU v11.1.1, symlink the sources,
 `configure --target-list=arm-softmmu`, ninja) **needs the owner's approval to run**; it
 was blocked by the session's permission policy.
+
+## Full-system status (2026-11-21) [VM]
+
+The stock IC-705 E 1.40 firmware boots on the patched `rz-a1h` QEMU machine
+(`RZA1H_BOARD=ic705`): boot loader → main image → Keil RTX → full bring-up → the
+480×272 UI, with real text (fonts/resources from flash 0xC00000), status bar (TX, battery,
+USB/FIL2/P.AMP1/AGC-M, clock, VFO A, BLANK), and the boot splash (ICOM / IC-705 / 1.40).
+UI language is Japanese (factory default: the settings EEPROM is blank).
+
+### What is modelled for the IC-705 (all in `qemu/ic705-port.patch`)
+
+| Block | Model | Firmware evidence |
+|---|---|---|
+| Flash 16 MiB | slot A at 0, resources at 0xC00000, slot-B tag erased | loader `0x200045F4`, `0x201049F0` |
+| Sub-CPU (SCIF3) | status frames `FC off data… FE` every 10 ms; version `1.20-E00`/`1.00-000`; P7_9 ready/ack follows P7_11 request; live byte overrides via file | RXI3 `0x20120CAC`, TX `0x20120960`, version `0x201211B4`, updater compare `0x2006C708` |
+| MTU2 | general model (all channels, compare/clear/overflow, IRQs) | TGI4A starts ADC `0x20005C48`; TGRC_4 at +0x228 |
+| ADC | single-conversion ADF, per-channel values | `0x201185AC`; supply class `0x2000B770` (≥0x28B = DC) |
+| DMAC ch8–15 | generic block transfers + DMAINT | ch10 GPIO bit-bang `0x2011EBBC`; ch15 SCIF3 TX |
+| RSPI0–4 | generic SPI master; RSPI4 backed by SPI-NOR (DSP group image) | DSP flash `0x2006A218`; RSPI3 register writes (RF/codec chip) |
+| GPIO | P3_9 POWER (active low), P7_9 sub-CPU handshake, live `pins` QOM property | `0x2011D6EC`, `0x20120960` |
+| Deep standby | DSFR reset value | `0x2007BB10` |
+| (from the IC-7300 machine, unchanged) | GIC, OSTM, WDT, RIIC0-2 (+EEPROM, RTC), SCIF, SDHI, VDC5 compositor, OpenVG, L2C | — |
+
+### Known gaps
+
+- **Boot hook:** the power-mode dispatcher `0x2007B7C0` gets a1=3 (standby/charge) because
+  the sub-CPU power-on handshake is not modelled; `--force-on` sets a1=1. Pulsing sub-CPU
+  status byte 0 also drives the power/display state (splash appears), the likely real
+  wake path.
+- **DSP/FPGA are dummies:** the firmware shows 「DSP/FPGAのファームウェアバージョンが
+  異なります」 because the main DSP / DV DSP / FPGA never answer the version handshake on
+  RSPI0 (`0x201FB8E8`, `0x20201F4C`; ready line P3_8; DMA ch5/13). The installed-version
+  block is `0x203E1B30` (13-byte entries, region pointers at `0x202E222C`).
+- **Input:** touch/keys path not identified yet (not on I2C: RIIC0=EEPROM 0x53,
+  RIIC1=0x6B/0x35; most likely via the sub-CPU status frame).
+- No audio, no RF; Wi-Fi/BT/GPS absent.
+
+### Running it
+
+```sh
+python3 tools/build_705_flash.py 705E140.dat ~/icom/out/705_flash.bin
+python3 tools/run705_gui.py                 # GTK window
+python3 tools/qemu705.py --force-on --secs 60 --shot out.png   # headless + screenshot
+echo 0=ff > <scratch>/substat.txt           # poke sub-CPU status byte 0 live
+```

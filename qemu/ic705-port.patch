@@ -294,10 +294,29 @@ index 0000000..9dfd6d9
 +
 +type_init(dh_register)
 diff --git a/qemu-machine/src/gpio.c b/qemu-machine/src/gpio.c
-index 908927a..750981f 100644
+index 908927a..33e7cd0 100644
 --- a/qemu-machine/src/gpio.c
 +++ b/qemu-machine/src/gpio.c
-@@ -423,6 +423,8 @@ static const MemoryRegionOps rza1h_gpio_ops = {
+@@ -413,6 +413,18 @@ static void rza1h_gpio_write(void *opaque, hwaddr offset, uint64_t value,
+     if (port == 2) {
+         gpio_p2_update(s);
+     }
++    /* IC-705 port: sub-CPU handshake. The ARM drives P7_11 low to request a transfer and
++     * waits for P7_9 to follow (0x20120960); P7_9 high = sub-CPU idle/ready. Model the
++     * sub-CPU's P7_9 as following the request latch once it has been driven. */
++    if (rza1h_board_ic705() && port == 7 &&
++        (group == G_P || group == G_PSR || group == G_PNOT)) {
++        bool req = (s->p[7] >> 11) & 1;
++        if (req) {
++            s->pin_level[7] |= 1u << 9;
++        } else {
++            s->pin_level[7] &= ~(1u << 9);
++        }
++    }
+ }
+ 
+ static const MemoryRegionOps rza1h_gpio_ops = {
+@@ -423,6 +435,8 @@ static const MemoryRegionOps rza1h_gpio_ops = {
      .endianness = DEVICE_LITTLE_ENDIAN,
  };
  
@@ -306,13 +325,15 @@ index 908927a..750981f 100644
  static void rza1h_gpio_reset(DeviceState *dev)
  {
      RZA1HGpioState *s = RZA1H_GPIO(dev);
-@@ -477,12 +479,53 @@ static void rza1h_gpio_reset(DeviceState *dev)
+@@ -477,12 +491,55 @@ static void rza1h_gpio_reset(DeviceState *dev)
       * P8_9/P1_7 above. See rza1h_gpio_set_civ_bus_busy() for how to simulate it going busy. */
      s->pin_level[7] |= 0x800;
  
 +    if (rza1h_board_ic705()) {
-+        /* IC-705 idle input levels (pull-ups): P3_9 = POWER key, released high [FW] */
++        /* IC-705 idle input levels (pull-ups): P3_9 = POWER key, released high [FW];
++         * P7_9 = sub-CPU ready, high while no request is pending [FW 0x20120960] */
 +        s->pin_level[3] |= 1u << 9;
++        s->pin_level[7] |= 1u << 9;
 +    }
 +    rza1h_gpio_apply_pins(s, getenv("RZA1H_PINS"));
 +
@@ -360,7 +381,7 @@ index 908927a..750981f 100644
  /* Live PWRK press/release for testing (2026-09-20) -- not a real hardware input this project
   * has any other way to drive, and this project's own PPR write handler correctly ignores guest
   * writes (PPR is real-hardware read-only), so a host-side QOM property is the only way to
-@@ -579,6 +622,7 @@ static void rza1h_gpio_init(Object *obj)
+@@ -579,6 +636,7 @@ static void rza1h_gpio_init(Object *obj)
                               rza1h_gpio_set_pwrk_pressed);
      object_property_add_bool(obj, "civ-bus-busy", rza1h_gpio_get_civ_bus_busy,
                               rza1h_gpio_set_civ_bus_busy);
@@ -695,10 +716,10 @@ index 0000000..1664993
 +type_init(mtu2g_register)
 diff --git a/qemu-machine/src/rspi_gen.c b/qemu-machine/src/rspi_gen.c
 new file mode 100644
-index 0000000..3570cc1
+index 0000000..7304927
 --- /dev/null
 +++ b/qemu-machine/src/rspi_gen.c
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,280 @@
 +/*
 + * RZ/A1H RSPI (channels 0..4) -- generic register model, written for the IC-705 port.
 + *
@@ -744,12 +765,92 @@ index 0000000..3570cc1
 +    uint8_t regs[0x100];
 +    uint8_t rx[RXQ];
 +    int rx_n;
++    /* optional SPI-NOR flash on this channel (RZA1H_RSPI<n>_FLASH=path): the IC-705's
++     * DSP/FPGA configuration flash sits on RSPI4 [FW 0x2006A218: 16 MiB]. A transaction
++     * is framed by SPCR.SPE 0->1 ... 1->0 (0x20069F30 / 0x2006A0CC). */
++    uint8_t *nor;
++    uint32_t nor_size;
++    uint8_t cmd;
++    int idx;
++    uint32_t addr;
++    bool wel;
 +    qemu_irq irq_rx, irq_tx;
 +};
++
++static uint8_t nor_byte(RZA1HRspiGState *s, uint8_t tx)
++{
++    int i = s->idx++;
++    if (i == 0) {
++        s->cmd = tx;
++        s->addr = 0;
++        if (tx == 0x06) {
++            s->wel = true;
++        } else if (tx == 0x04) {
++            s->wel = false;
++        }
++        return 0xFF;
++    }
++    switch (s->cmd) {
++    case 0x05:                                  /* RDSR: never busy */
++        return s->wel ? 0x02 : 0x00;
++    case 0x9F: {                                /* RDID: IS25LP128 */
++        static const uint8_t id[3] = { 0x9D, 0x60, 0x18 };
++        return i <= 3 ? id[i - 1] : 0xFF;
++    }
++    case 0x03: case 0x0B: case 0x02: case 0xD8: case 0x20:
++        if (i <= 3) {
++            s->addr = (s->addr << 8) | tx;
++            if (i == 3 && (s->cmd == 0xD8 || s->cmd == 0x20) && s->wel) {
++                uint32_t sz = s->cmd == 0xD8 ? 0x10000 : 0x1000;
++                uint32_t a = (s->addr % s->nor_size) & ~(sz - 1);
++                memset(s->nor + a, 0xFF, MIN(sz, s->nor_size - a));
++                s->wel = false;
++                rza1h_debug("rspi", "rspi%u nor erase %#x (%#x)", s->channel, a, sz);
++            }
++            return 0xFF;
++        }
++        if (s->cmd == 0x0B && i == 4) {
++            return 0xFF;                        /* fast-read dummy byte */
++        }
++        if (s->cmd == 0x02) {
++            if (s->wel) {
++                uint32_t a = (s->addr & ~0xFFu) | ((s->addr + (i - 4)) & 0xFF);
++                s->nor[a % s->nor_size] &= tx;
++            }
++            return 0xFF;
++        }
++        if (s->cmd == 0x03 || s->cmd == 0x0B) {
++            return s->nor[s->addr++ % s->nor_size];
++        }
++        return 0xFF;
++    case 0xC7: case 0x60:
++        return 0xFF;
++    default:
++        return 0xFF;
++    }
++}
++
++static void nor_end(RZA1HRspiGState *s)
++{
++    if (s->idx > 0) {
++        if (s->cmd == 0x02) {
++            s->wel = false;
++        } else if ((s->cmd == 0xC7 || s->cmd == 0x60) && s->wel) {
++            memset(s->nor, 0xFF, s->nor_size);
++            s->wel = false;
++        }
++        rza1h_debug("rspi", "rspi%u nor cmd %02x addr %#x (%d bytes)", s->channel, s->cmd,
++                    s->addr, s->idx);
++    }
++    s->idx = 0;
++}
 +
 +static uint8_t dev_reply(RZA1HRspiGState *s, uint8_t tx)
 +{
 +    char name[24];
++    if (s->nor) {
++        return nor_byte(s, tx);
++    }
 +    snprintf(name, sizeof(name), "RZA1H_RSPI%u_MISO", s->channel);
 +    const char *e = getenv(name);
 +    return e ? strtoul(e, NULL, 0) : 0xFF;
@@ -815,6 +916,12 @@ index 0000000..3570cc1
 +    case SPSR:
 +        s->regs[off] &= v;      /* error flags clear by writing 0 */
 +        break;
++    case SPCR:
++        if (s->nor && (s->regs[SPCR] & SPCR_SPE) && !(v & SPCR_SPE)) {
++            nor_end(s);
++        }
++        s->regs[SPCR] = v;
++        break;
 +    default:
 +        memcpy(&s->regs[off], &v, size);
 +        break;
@@ -838,6 +945,26 @@ index 0000000..3570cc1
 +    update(s);
 +}
 +
++static void rg_realize(DeviceState *dev, Error **errp)
++{
++    RZA1HRspiGState *s = RZA1H_RSPI_GEN(dev);
++    char name[32];
++    snprintf(name, sizeof(name), "RZA1H_RSPI%u_FLASH", s->channel);
++    const char *path = getenv(name);
++    if (path) {
++        gsize len = 0;
++        gchar *data = NULL;
++        s->nor_size = 0x1000000;
++        s->nor = g_malloc(s->nor_size);
++        memset(s->nor, 0xFF, s->nor_size);
++        if (g_file_get_contents(path, &data, &len, NULL)) {
++            memcpy(s->nor, data, MIN(len, s->nor_size));
++            g_free(data);
++        }
++        rza1h_debug("rspi", "rspi%u: SPI-NOR from %s (%zu bytes)", s->channel, path, (size_t)len);
++    }
++}
++
 +static void rg_init(Object *obj)
 +{
 +    RZA1HRspiGState *s = RZA1H_RSPI_GEN(obj);
@@ -856,6 +983,7 @@ index 0000000..3570cc1
 +    DeviceClass *dc = DEVICE_CLASS(oc);
 +    device_class_set_legacy_reset(dc, rg_reset);
 +    device_class_set_props(dc, rg_props);
++    dc->realize = rg_realize;
 +}
 +
 +static const TypeInfo rg_info = {
@@ -1028,7 +1156,7 @@ index e356640..72eeaf4 100644
 +
  #endif /* RZA1H_DEBUG_H */
 diff --git a/qemu-machine/src/scif.c b/qemu-machine/src/scif.c
-index 11f4f4c..6d47fc9 100644
+index 11f4f4c..3ad0ab7 100644
 --- a/qemu-machine/src/scif.c
 +++ b/qemu-machine/src/scif.c
 @@ -262,6 +262,12 @@ struct RZA1HScifState {
@@ -1044,7 +1172,7 @@ index 11f4f4c..6d47fc9 100644
      uint8_t  frontpanel_pending_ack_type; /* stashed for the timer callback,
                                              * since ptimer callbacks only
                                              * get `opaque`, not an argument */
-@@ -430,6 +436,69 @@ static uint64_t scif_byte_time_ns(RZA1HScifState *s)
+@@ -430,6 +436,88 @@ static uint64_t scif_byte_time_ns(RZA1HScifState *s)
      return bit_ns * 10;
  }
  
@@ -1088,6 +1216,25 @@ index 11f4f4c..6d47fc9 100644
 +
 +    if ((s->scr & SCR_RE) && s->inj_head == s->inj_tail && !s->rx_pending) {
 +        const char *e = getenv("RZA1H_IC705_SUBSTAT");
++        /* live override: RZA1H_IC705_SUBSTAT_FILE holds "off=hexbytes" lines, re-read
++         * every frame, so a host tool can change sub-CPU status bytes while running */
++        const char *fpath = getenv("RZA1H_IC705_SUBSTAT_FILE");
++        if (fpath) {
++            gchar *txt = NULL;
++            if (g_file_get_contents(fpath, &txt, NULL, NULL)) {
++                for (char *line = strtok(txt, "\n"); line; line = strtok(NULL, "\n")) {
++                    unsigned off;
++                    char hex[256];
++                    if (sscanf(line, "%u=%255s", &off, hex) == 2) {
++                        for (int i = 0; hex[2 * i] && hex[2 * i + 1] && off + i < 54; i++) {
++                            char h[3] = { hex[2 * i], hex[2 * i + 1], 0 };
++                            s->ic705_status[off + i] = strtoul(h, NULL, 16);
++                        }
++                    }
++                }
++                g_free(txt);
++            }
++        }
 +        if (e) {
 +            for (int i = 0; i < 54 && e[2 * i] && e[2 * i + 1]; i++) {
 +                char h[3] = { e[2 * i], e[2 * i + 1], 0 };
@@ -1114,7 +1261,7 @@ index 11f4f4c..6d47fc9 100644
  static uint64_t rza1h_scif_read(void *opaque, hwaddr offset, unsigned size)
  {
      RZA1HScifState *s = RZA1H_SCIF(opaque);
-@@ -1158,6 +1227,11 @@ static void rza1h_scif_write(void *opaque, hwaddr offset, uint64_t value,
+@@ -1158,6 +1246,11 @@ static void rza1h_scif_write(void *opaque, hwaddr offset, uint64_t value,
              qemu_irq_lower(s->irq_tx);
          }
          s->scr = value;
@@ -1126,7 +1273,7 @@ index 11f4f4c..6d47fc9 100644
          break;
      case REG_FTDR:
          byte = value;
-@@ -1166,7 +1240,7 @@ static void rza1h_scif_write(void *opaque, hwaddr offset, uint64_t value,
+@@ -1166,7 +1259,7 @@ static void rza1h_scif_write(void *opaque, hwaddr offset, uint64_t value,
           * order, so rza1h_scif5_dsp_ack can answer based on what was
           * actually asked instead of firing one fixed canned class always.
           * See that function's own comment for the byte-order derivation. */
@@ -1135,7 +1282,7 @@ index 11f4f4c..6d47fc9 100644
              if (s->scif5_cmd_pos >= 0 && s->scif5_cmd_pos < 4) {
                  s->scif5_cmd_buf[s->scif5_cmd_pos++] = byte;
              } else {
-@@ -1245,7 +1319,7 @@ static void rza1h_scif_write(void *opaque, hwaddr offset, uint64_t value,
+@@ -1245,7 +1338,7 @@ static void rza1h_scif_write(void *opaque, hwaddr offset, uint64_t value,
           * whole question without needing to model that pacing: pump_tick
           * clears bit 0x40 itself before sending, so with nothing setting
           * it again, the ping fires exactly once and the driver settles. */
@@ -1144,12 +1291,18 @@ index 11f4f4c..6d47fc9 100644
              if (byte == 0xFE) {
                  s->tx_frame_pos = 0;
              } else if (s->tx_frame_pos == 0) {
-@@ -1451,7 +1525,11 @@ static void rza1h_scif_realize(DeviceState *dev, Error **errp)
+@@ -1451,7 +1544,17 @@ static void rza1h_scif_realize(DeviceState *dev, Error **errp)
      ptimer_set_freq(s->frontpanel_ack_timer, 1000000000);
      ptimer_transaction_commit(s->frontpanel_ack_timer);
  
 -    if (s->channel == 3) {
 +    if (s->channel == 3 && rza1h_board_ic705()) {
++        /* Default sub-CPU status: mirror[3..8] = application version "1.20-E00" (matches
++         * the E140 .dat header's aux version, hdr[20:28], which the updater compares
++         * against -- see 0x2006C708), mirror[9..14] = boot loader "1.00-000"
++         * (formatted by 0x201211B4). */
++        static const char ver[] = "120E00" "100000";
++        memcpy(&s->ic705_status[3], ver, 12);
 +        s->ic705_sub_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, rza1h_ic705_sub_tick, s);
 +        timer_mod(s->ic705_sub_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + IC705_SUB_PERIOD_NS);
 +    }

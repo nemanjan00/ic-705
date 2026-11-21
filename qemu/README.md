@@ -23,6 +23,10 @@ entered with a1=3 (standby/charge) because the sub-CPU wake handshake is not mod
 yet; the hook sets a1=1 (full bring-up). Remove once the sub-CPU status frame carries a
 proper power-on reason.
 
-Status (2026-11-21): reaches the RTX idle task with the UI drawn (480x272): TX icon,
+| SPI-NOR on RSPI4 (`RZA1H_RSPI4_FLASH`) | `rspi_gen.c` | DSP/FPGA config flash, 16 MiB, `0x2006A218` |
+| sub-CPU P7_9 ack follows P7_11 request; P7_9 idle high | `gpio.c` | `0x20120960` handshake |
+| sub-CPU version `1.20-E00`/`1.00-000`, live status file `RZA1H_IC705_SUBSTAT_FILE` | `scif.c` | `0x201211B4`, `0x2006C708` |
+
+Status (2026-11-21, earlier): reaches the RTX idle task with the UI drawn (480x272): TX icon,
 battery, mode tab, digits, BLANK label, and an error dialog (red X) -- text glyphs
 missing, error presumably from the dummy DSP/FPGA.
