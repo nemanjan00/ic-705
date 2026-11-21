@@ -8,6 +8,7 @@ what the radio does.
 | Layer | Status | Tool |
 |---|---|---|
 | ARM function-level (call one firmware function, log MMIO) | **working** | `tools/arm_emu.py` (Unicorn 2.1.4) |
+| ARM updater (DSP flash writer) | **working** | `tools/arm_dsp_update_emu.py`: firmware code with HLE for SD read + SPI-NOR model |
 | ARM full-system (boot RTX, UI) | not started | QEMU RZ/A1 machine from jeskko/ic7300-homebrew [EXT] is the starting point; needs VDC5, GIC, OSTM, SCIF models |
 | DV DSP (C55x) | **working for the modulator** | `tools/c55_emu.py`: interprets the IDA-decoded instruction stream; DSPLIB `fir` is emulated at high level |
 | Main DSP, FPGA | out of reach for now | chip/format not identified |
@@ -51,3 +52,12 @@ link is the DV DSP host link is [INF] (see `DV_DSP.md`).
   flag at its init value (0), both readings give the same stock output, and the 4FSK
   patch removes both instructions.
 - **Positive control:** stock `gmsk_mod_bit` equals an independent GMSK model exactly.
+
+## `tools/arm_dsp_update_emu.py` [VM]
+
+`Arm.hle(addr, fn)` replaces one firmware function with Python (Unicorn code hook,
+return via LR with Thumb interworking). The DSP flash writer runs as real code. Only
+`f_read` (`0x201F29F8`), the FatFs result mapper (`0x200641D4`) and the two RSPI4
+SPI-transaction functions (`0x20069F30`, `0x2006A0CC`) are replaced; the latter are
+backed by a 16 MiB SPI-NOR model that enforces WREN before erase/program and AND-
+programs pages. Results are in `POC.md` (cases A–D). One run takes about 1 s.

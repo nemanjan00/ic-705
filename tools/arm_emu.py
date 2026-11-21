@@ -12,7 +12,7 @@ single firmware function with arguments.  Bring your own decoded image
 """
 import struct
 from unicorn import Uc, UC_ARCH_ARM, UC_MODE_ARM, UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE, \
-    UC_HOOK_MEM_UNMAPPED, UcError
+    UC_HOOK_MEM_UNMAPPED, UC_HOOK_CODE, UcError
 from unicorn.arm_const import *
 
 LOAD = 0x20005000
@@ -50,6 +50,30 @@ class Arm:
     def _unmapped(self, uc, access, addr, size, value, _):
         print(f'unmapped access {access} @0x{addr:08x} pc=0x{uc.reg_read(UC_ARM_REG_PC):08x}')
         return False
+
+    def hle(self, addr, fn):
+        """Replace the firmware function at `addr` with Python: fn(self, r0..r3) -> r0."""
+        def hook(uc, address, size, _):
+            r = [uc.reg_read(x) for x in (UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3)]
+            ret = fn(self, *r)
+            uc.reg_write(UC_ARM_REG_R0, (ret or 0) & 0xFFFFFFFF)
+            lr = uc.reg_read(UC_ARM_REG_LR)
+            if lr & 1:   # return to Thumb
+                cpsr = uc.reg_read(UC_ARM_REG_CPSR); uc.reg_write(UC_ARM_REG_CPSR, cpsr | 0x20)
+            else:
+                cpsr = uc.reg_read(UC_ARM_REG_CPSR); uc.reg_write(UC_ARM_REG_CPSR, cpsr & ~0x20)
+            uc.reg_write(UC_ARM_REG_PC, lr & ~1)
+        self.uc.hook_add(UC_HOOK_CODE, hook, begin=addr, end=addr)
+
+    def stack_arg(self, i):
+        sp = self.uc.reg_read(UC_ARM_REG_SP)
+        return struct.unpack('<I', self.read(sp + 4 * i, 4))[0]
+
+    def w32(self, addr, v):
+        self.uc.mem_write(addr, struct.pack('<I', v & 0xFFFFFFFF))
+
+    def r32(self, addr):
+        return struct.unpack('<I', self.read(addr, 4))[0]
 
     def put(self, data):
         a = self.heap

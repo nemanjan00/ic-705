@@ -46,3 +46,13 @@ Symptom → cause → fix. Append the moment one bites.
   every new instruction by letting IDA decode it before running it.
 - **DMR sync detection alone doesn't prove 4-level correctness**: sync words use only
   ±3 symbols. Use dibit-exact recovery as the evidence.
+
+## Updater / delivery
+
+- **A patched DSP region with an unchanged version string is silently not flashed.**
+  The updater reprograms DSP region i only if header version i (`hdr[28+4i:32+4i]`)
+  differs from the installed one. Bump it. [FW+VM]
+- **Bumping a version changes the IV** (IV = byte sum of the domain's version fields). A
+  stream sealed with the old IV still passes the MD5 (over stored bytes) but decodes to
+  garbage, and the updater then overwrites the DSP boot stub. Always re-encrypt after
+  touching the header (`dsp_reseal.py --region0-version` does). [VM case D]

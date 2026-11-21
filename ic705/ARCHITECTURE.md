@@ -28,6 +28,25 @@ DSP Data 1.00, FPGA 1.01, DV DSP 1.11.
 | `0x080000` | `"30001000"` header + 776 × (byte offset, 16-bit word count) table; 324 non-empty entries, ~830 KiB, entropy 7.1 | [FW], meaning [INF] |
 | `0x180000` | `"30001010"` header + FPGA bitstream | [FW] |
 
+## DSP / FPGA flash and the update path [FW]
+
+- The DSP group (2 MiB) lives in a **separate 16 MiB SPI-NOR on RSPI4** (`0xE800E800`).
+  The ARM programs it during SD updates. At runtime the ARM never parses the C55x boot
+  table (no `0x09AA` constant in the ARM image), so the DSPs presumably boot from this
+  flash [INF].
+- Flash regions (updater table at `0x202E2218`): `0:[0x000000,0x040000)` DSP-A + DV DSP,
+  `1:[0x040000,0x080000)`, `2:[0x080000,0x180000)`, `3:[0x180000,0x200000)` FPGA.
+- Header bytes 28..43 hold four 4-byte region versions (`1.41 3.06 3.00 3.00` in E140).
+  Region i is reprogrammed only if its version differs from the installed one
+  (pre-scan `0x2006C708` sets mask bit i, writer `0x2006AB5C` gates on it), and then only
+  the 64 KiB blocks whose read-back differs.
+- **Autokey IVs = byte sum of the domain's header version field(s)**: main `hdr[4:12]`
+  (E140: `0x9B`), aux `hdr[20:28]`, DSP `hdr[28:44]` (`0x0D`), WLAN `hdr[44:56]`; the
+  counter starts at 75 (`0x4B`). The footer is a fixed constant, not a checksum.
+- Updater: `0x2006DAB0` (whole `.dat`), helpers `0x20069AAC` (autokey), `0x2009A694`
+  (MD5Update), `0x20069CC8` (streaming LZSS), `0x2006B78C` (sub-CPU over SCIF3,
+  `"ICOM4075S"` + `0x55` handshake).
+
 ## C55x boot table format (as observed)
 
 `u16 0x09AA`, `u32 entry (byte address)`, `u16 n`, `n × (u16 reg, u16 value)`

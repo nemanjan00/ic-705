@@ -14,6 +14,11 @@ Tags: [FW] firmware static · [HW] radio · [VM] emulator · [EXT] outside · [I
   how DV vs FM modes set it. Or: DSP-side 4FSK demodulator PoC on I2S0-L, and the
   host dibit feed.
 
+- **ARM updater emulated [VM]:** the radio's own DSP-flash writer, fed the patched `.dat`
+  (region 0 → `1.42`), programs exactly the patched DV DSP image into the modelled
+  SPI-NOR; an unchanged version is silently skipped; a wrong IV writes garbage.
+  IV rule solved: IV = byte sum of header version fields [FW].
+
 ## Backups on record
 
 None — no radio access so far; static analysis of `705E140.dat` (MD5 `2c9c1d7f…`).

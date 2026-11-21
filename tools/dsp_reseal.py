@@ -11,7 +11,15 @@ starting at 0x4B and incrementing mod 256; the first plaintext byte is an LZSS f
 byte 0xFF, which fixes the initial feedback.  MD5 is over the *stored* bytes.
 
   dsp_reseal.py decode  in.dat  dsp.image.bin
-  dsp_reseal.py reseal  in.dat  dsp.image.bin  out.dat
+  dsp_reseal.py reseal  in.dat  dsp.image.bin  out.dat  [--region0-version 1.42]
+
+Per-domain IV (initial autokey feedback) = byte sum (mod 256) of that domain's
+version field(s) in the header [FW: ARM updater pre-scan 0x2006C708]:
+  main  = sum(hdr[4:12])      aux = sum(hdr[20:28])
+  DSP   = sum(hdr[28:44])     (four 4-byte region versions)   WLAN = sum(hdr[44:56])
+The updater only reprograms DSP flash region i (0:0x000000 DSP-A+DV DSP, 1:0x040000,
+2:0x080000, 3:0x180000 FPGA) when header version i differs from the installed one, so
+a patched region must carry a new version string -> new IV.
 
 The new stream is stored at its exact length (as Icom's files are: the stream
 consumes the whole DSP field), header field 0x54 is updated, and the WLAN group and
@@ -53,7 +61,12 @@ def autokey_enc(plain, iv):
 
 
 def iv_of(stored):
+    """IV recovered from the stored stream (first plaintext byte is flag 0xFF)."""
     return ((stored[0] ^ 0xFF) - CTR0) & 0xFF
+
+
+def dsp_iv_from_header(d):
+    return sum(d[28:44]) & 0xFF
 
 
 def decode(d):
@@ -67,8 +80,16 @@ def decode(d):
     return img, iv, used, L
 
 
-def reseal(d, new_img):
+def reseal(d, new_img, region0_version=None):
     img, iv, used, L = decode(d)
+    if iv != dsp_iv_from_header(d):
+        raise RuntimeError('header-derived IV does not match the stream')
+    if region0_version is not None:
+        v = region0_version.encode()
+        if len(v) != 4:
+            raise ValueError('region version must be 4 ASCII bytes, e.g. 1.42')
+        d = d[:28] + v + d[32:]
+        iv = dsp_iv_from_header(d)
     if len(new_img) != L['dsp_out']:
         raise ValueError('image size must stay %#x' % L['dsp_out'])
     comp = lzss_compress(new_img)
@@ -98,6 +119,7 @@ if __name__ == '__main__':
         print(f'DSP @0x{L["dsp"]:x} stored {L["dsp_len"]} -> {len(img)} bytes, iv=0x{iv:02x}, used {used}')
     elif cmd == 'reseal':
         new = open(sys.argv[3], 'rb').read()
-        out, n = reseal(d, new)
+        ver = sys.argv[sys.argv.index('--region0-version') + 1] if '--region0-version' in sys.argv else None
+        out, n = reseal(d, new, ver)
         open(sys.argv[4], 'wb').write(out)
         print(f'wrote {sys.argv[4]}: DSP stream {n} bytes (slot {layout(d)["dsp_len"]}), MD5 resealed')

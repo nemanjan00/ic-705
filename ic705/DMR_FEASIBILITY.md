@@ -55,7 +55,7 @@ least certain part.
 | R4 | RX discriminator, ≥ ±4.8 kHz channel | Rate is OK: the discriminator arrives at 48 kHz, 10 samples/symbol. Width is likely OK: the FPGA→DSP baseband is reported as 12 kHz wide. | [FW] rate, [EXT] width |
 | R5 | TDMA timing | Simplex/hotspot: continuous TX with one used slot. Repeater uplink: needs about 30 ms T/R keying. | [INF] |
 | R6 | DMR framing, FEC, LC | Software only (ARM ICAP app or DV DSP) | [INF] |
-| R7 | Patch delivery | **Done at file level**: `tools/dsp_reseal.py` re-seals the DSP group (exact-length stream, field `0x54`, size law). sq6emm's independent decoder accepts identity and patched files. Radio acceptance [HW] unverified. | [FW] |
+| R7 | Patch delivery | **Done in emulation**. `tools/dsp_reseal.py` re-seals the DSP group, bumps the region-0 version and re-encrypts with the header-derived IV. The radio's own updater code, run in Unicorn, writes exactly the patched image into the DSP flash ([POC.md](POC.md)). On a real radio: unverified [HW]. | [FW] rules, [VM] run |
 | R8 | ARM↔DV DSP bandwidth | Candidate link SCIF5, clock-sync, about 10 kbit/s. Enough for vocoder frames (2450–3600 bit/s), too tight for raw dibits plus overhead. | [VM] config, [INF] rate |
 
 ## R1 — vocoder tables

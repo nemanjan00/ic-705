@@ -53,6 +53,31 @@ Negative-control caveat: a 2-level signal still syncs (16 vs 18) because DMR syn
 words use only ±3 symbols — sync count alone does not prove 4-level correctness; the
 0-error dibit recovery in step 2 does.
 
+## The radio's own updater writes it (ARM emulation) [VM]
+
+`tools/arm_dsp_update_emu.py` runs the IC-705's SD-card DSP-flash writer as real
+firmware code in Unicorn. The chain is MD5Init `0x20099B68` → `0x2006AB5C(fh, 0, f54,
+md5ctx, 0)` → MD5Final `0x2009A760`. Inside that chain the firmware does its own SD read,
+MD5 of the stored bytes, autokey de-obfuscation, streaming LZSS, region gating,
+per-64 KiB read-compare, sector erase and page program. Only the SD file read and the
+SPI-NOR chip on RSPI4 are modelled (`06 05 03 D8 02`).
+
+| Case | MD5 | IV | Region mask | SPI activity | DSP flash after |
+|---|---|---|---|---|---|
+| A stock `.dat` over stock flash | ok | `0x0D` | `0000` | none | unchanged |
+| **B patched, region 0 version `1.42`** | ok | `0x0E` | `0001` | 780 READ, 414 WREN, erase `0x10000`+`0x20000`, 412 PP | **== patched image** |
+| C patched, version left `1.41` | ok | `0x0D` | `0000` | none | unchanged (**patch silently skipped**) |
+| D version bumped, stream not re-encrypted | **ok** | `0x0E` | `0001` | erases `0x0`…`0x30000` | **260 162 wrong bytes in region 0** |
+
+So a deliverable DSP patch must (1) bump the region-0 version string in the header
+(`hdr[28:32]`) and (2) be encrypted with IV = sum(`hdr[28:44]`). `dsp_reseal.py
+--region0-version` does both. Case D shows the MD5 does **not** catch a wrong IV: the
+updater would overwrite the DSP boot stub with garbage.
+
+What is still not emulated: the DV DSP booting from that SPI flash (C55x ROM boot
+loader → DSP-A stub at `0x0` → DV DSP boot table at `0x10000`), and the pre-scan
+`0x2006C708` itself (its IV and mask rules are applied from the decompiled logic).
+
 ## Reproduce (needs your own `705E140.dat` and the sq6emm decoder)
 
 ```sh
@@ -60,7 +85,8 @@ python3 tools/dv_mod_poc.py                       # steps 1-2
 python3 tools/dmr_poc_wav.py /tmp/dmr.wav          # step 3 input
 dsd-neo -i /tmp/dmr.wav -s 48000 -o null
 python3 tools/dv_patch_4fsk.py dsp.image.bin dsp_4fsk.bin
-python3 tools/dsp_reseal.py reseal 705E140.dat dsp_4fsk.bin out.dat
+python3 tools/dsp_reseal.py reseal 705E140.dat dsp_4fsk.bin out.dat --region0-version 1.42
+python3 tools/arm_dsp_update_emu.py                # runs cases A-C against out/
 ```
 The emulator needs `dspB.mem` and IDA-exported instruction JSON for `0x16B60–0x16BAF`
 (stock and patched); see `EMULATION.md`.
