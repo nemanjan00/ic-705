@@ -1,0 +1,708 @@
+diff --git a/qemu-machine/patches/hw-arm-build.patch b/qemu-machine/patches/hw-arm-build.patch
+index 85a6e02..1284f35 100644
+--- a/qemu-machine/patches/hw-arm-build.patch
++++ b/qemu-machine/patches/hw-arm-build.patch
+@@ -22,6 +22,6 @@ index 4233a80..605fa4f 100644
+  arm_common_ss.add(when: 'CONFIG_VEXPRESS', if_true: files('vexpress.c'))
+  
+  arm_common_ss.add(files('boot.c'))
+-+arm_common_ss.add(when: 'CONFIG_RZA1H', if_true: files('rz_a1h.c', 'ostm.c', 'spibsc.c', 'wdt.c', 'stbc.c', 'gpio.c', 'l2c.c', 'scif.c', 'mmc.c', 'sdhi.c', 'riic.c', 'mtu2.c', 'dmac.c', 'rspi2.c', 'openvg.c', 'rx8803.c', 'adc.c', 'vdc5.c', 'fake_dsp.c', 'fake_fpga.c', 'ssif.c'))
+++arm_common_ss.add(when: 'CONFIG_RZA1H', if_true: files('rz_a1h.c', 'ostm.c', 'spibsc.c', 'wdt.c', 'stbc.c', 'gpio.c', 'l2c.c', 'scif.c', 'mmc.c', 'sdhi.c', 'riic.c', 'mtu2.c', 'mtu2g.c', 'dmac.c', 'rspi2.c', 'openvg.c', 'rx8803.c', 'adc.c', 'vdc5.c', 'fake_dsp.c', 'fake_fpga.c', 'ssif.c'))
+  
+  hw_common_arch += {'arm': arm_common_ss}
+diff --git a/qemu-machine/setup.sh b/qemu-machine/setup.sh
+index 4fcbd09..23b9e2a 100755
+--- a/qemu-machine/setup.sh
++++ b/qemu-machine/setup.sh
+@@ -27,7 +27,7 @@ echo "Symlinking sources..."
+ # pass caught it (it was already symlinked by hand in an earlier session,
+ # so the gap was latent -- a from-scratch qemu-src/ checkout would have
+ # failed to build). Keep this in sync with meson.build's files() list.
+-for f in rz_a1h.c rz_a1h.h rza1h_debug.h ostm.c spibsc.c wdt.c stbc.c gpio.c l2c.c scif.c mmc.c sdhi.c riic.c mtu2.c dmac.c rspi2.c openvg.c rx8803.c adc.c vdc5.c fake_dsp.c fake_dsp.h fake_fpga.c fake_fpga.h ssif.c; do
++for f in rz_a1h.c rz_a1h.h rza1h_debug.h ostm.c spibsc.c wdt.c stbc.c gpio.c l2c.c scif.c mmc.c sdhi.c riic.c mtu2.c mtu2g.c dmac.c rspi2.c openvg.c rx8803.c adc.c vdc5.c fake_dsp.c fake_dsp.h fake_fpga.c fake_fpga.h ssif.c; do
+     ln -sf "../../../src/$f" "$QEMU_SRC/hw/arm/$f"
+ done
+ 
+diff --git a/qemu-machine/src/adc.c b/qemu-machine/src/adc.c
+index bf2411b..2ade9c9 100644
+--- a/qemu-machine/src/adc.c
++++ b/qemu-machine/src/adc.c
+@@ -48,6 +48,7 @@
+ #include "qom/object.h"
+ 
+ #include "rz_a1h.h"
++#include "rza1h_debug.h"
+ 
+ OBJECT_DECLARE_SIMPLE_TYPE(RZA1HAdcState, RZA1H_ADC)
+ 
+@@ -59,6 +60,7 @@ struct RZA1HAdcState {
+ 
+ #define ADC_DRA 0x00
+ #define ADC_DRH 0x0e
++#define ADC_ADCSR 0x60
+ 
+ /* Mid-scale 10-bit reading (0x200 of 0-0x3ff), left-justified per the real register's own
+  * bits-15:6 layout -- see the file comment for why >>6 in the real driver confirms this. */
+@@ -70,6 +72,16 @@ static uint64_t rza1h_adc_read(void *opaque, hwaddr offset, unsigned size)
+     uint64_t val = 0;
+ 
+     if (offset <= ADC_DRH && (offset % 2) == 0) {
++        /* RZA1H_ADC_VALS="v0,v1,...,v7" (10-bit) overrides per-channel readings */
++        const char *e = getenv("RZA1H_ADC_VALS");
++        if (e) {
++            int ch = offset / 2, i = 0;
++            const char *p = e;
++            while (*p && i < ch) { if (*p++ == ',') i++; }
++            if (i == ch && *p) {
++                return (strtoul(p, NULL, 0) & 0x3ff) << 6;
++            }
++        }
+         return ADC_QUIESCENT_READING;
+     }
+ 
+@@ -82,6 +94,23 @@ static void rza1h_adc_write(void *opaque, hwaddr offset, uint64_t value,
+ {
+     RZA1HAdcState *s = RZA1H_ADC(opaque);
+ 
++    /* IC-705 port: single-conversion completion. The IC-705 starts a conversion with
++     * ADCSR.ADST (bit 13) and polls ADF (bit 15) set + ADST clear; complete instantly.
++     * Writing ADF=0 clears it (RZ/A1 ADCSR semantics). */
++    if (rza1h_board_ic705() && offset == ADC_ADCSR && size == 2) {
++        uint16_t old, v = value;
++        memcpy(&old, &s->regs[offset], 2);
++        if (!(v & 0x8000)) {
++            old &= ~0x8000;
++        }
++        if (v & 0x2000) {
++            v = (v & ~0x2000) | 0x8000;
++        } else {
++            v = (v & ~0x8000) | (old & 0x8000);
++        }
++        memcpy(&s->regs[offset], &v, 2);
++        return;
++    }
+     memcpy(&s->regs[offset], &value, size);
+ }
+ 
+diff --git a/qemu-machine/src/gpio.c b/qemu-machine/src/gpio.c
+index 908927a..750981f 100644
+--- a/qemu-machine/src/gpio.c
++++ b/qemu-machine/src/gpio.c
+@@ -423,6 +423,8 @@ static const MemoryRegionOps rza1h_gpio_ops = {
+     .endianness = DEVICE_LITTLE_ENDIAN,
+ };
+ 
++static void rza1h_gpio_apply_pins(RZA1HGpioState *s, const char *spec);
++
+ static void rza1h_gpio_reset(DeviceState *dev)
+ {
+     RZA1HGpioState *s = RZA1H_GPIO(dev);
+@@ -477,12 +479,53 @@ static void rza1h_gpio_reset(DeviceState *dev)
+      * P8_9/P1_7 above. See rza1h_gpio_set_civ_bus_busy() for how to simulate it going busy. */
+     s->pin_level[7] |= 0x800;
+ 
++    if (rza1h_board_ic705()) {
++        /* IC-705 idle input levels (pull-ups): P3_9 = POWER key, released high [FW] */
++        s->pin_level[3] |= 1u << 9;
++    }
++    rza1h_gpio_apply_pins(s, getenv("RZA1H_PINS"));
++
+     s->icr0 = s->icr1 = 0;
+     s->irqrr = 0;
+     qemu_irq_lower(s->irq7);
+     qemu_irq_lower(s->irq3);
+ }
+ 
++/* IC-705 port: generic pin levels. Spec "port_bit=level,..." e.g. "3_9=1,7_8=0".
++ * RZA1H_PINS applies at reset; the QOM string property "pins" applies live. */
++static void rza1h_gpio_apply_pins(RZA1HGpioState *s, const char *spec)
++{
++    while (spec && *spec) {
++        unsigned port, bit, lvl;
++        if (sscanf(spec, "%u_%u=%u", &port, &bit, &lvl) == 3 && port < NUM_PORTS && bit < 16) {
++            if (lvl) {
++                s->pin_level[port] |= 1u << bit;
++            } else {
++                s->pin_level[port] &= ~(1u << bit);
++            }
++        }
++        spec = strchr(spec, ',');
++        if (spec) {
++            spec++;
++        }
++    }
++}
++
++static char *rza1h_gpio_get_pins(Object *obj, Error **errp)
++{
++    RZA1HGpioState *s = RZA1H_GPIO(obj);
++    GString *g = g_string_new("");
++    for (int p = 0; p < NUM_PORTS; p++) {
++        g_string_append_printf(g, "%sP%d=%04x", p ? " " : "", p, s->pin_level[p]);
++    }
++    return g_string_free(g, false);
++}
++
++static void rza1h_gpio_set_pins(Object *obj, const char *v, Error **errp)
++{
++    rza1h_gpio_apply_pins(RZA1H_GPIO(obj), v);
++}
++
+ /* Live PWRK press/release for testing (2026-09-20) -- not a real hardware input this project
+  * has any other way to drive, and this project's own PPR write handler correctly ignores guest
+  * writes (PPR is real-hardware read-only), so a host-side QOM property is the only way to
+@@ -579,6 +622,7 @@ static void rza1h_gpio_init(Object *obj)
+                              rza1h_gpio_set_pwrk_pressed);
+     object_property_add_bool(obj, "civ-bus-busy", rza1h_gpio_get_civ_bus_busy,
+                              rza1h_gpio_set_civ_bus_busy);
++    object_property_add_str(obj, "pins", rza1h_gpio_get_pins, rza1h_gpio_set_pins);
+ }
+ 
+ static void rza1h_gpio_class_init(ObjectClass *oc, const void *data)
+diff --git a/qemu-machine/src/mtu2g.c b/qemu-machine/src/mtu2g.c
+new file mode 100644
+index 0000000..1664993
+--- /dev/null
++++ b/qemu-machine/src/mtu2g.c
+@@ -0,0 +1,319 @@
++/*
++ * RZ/A1H MTU2 -- general (register-accurate) model, written for the IC-705 port.
++ *
++ * mtu2.c models exactly the compare-match events the IC-7300 firmware uses, armed by the
++ * register writes that firmware happens to make. The IC-705 firmware drives the same
++ * timer differently (e.g. its TGI4A handler starts the ADC), so this device instead
++ * models the timer itself:
++ *
++ *  - channels 0..4, each a 16-bit TCNT counting P0phi / prescaler while TSTR.CSTn is set;
++ *  - compare match on TGRA..TGRD (ch0 also E/F are ignored), setting TSR.TGFx and, when
++ *    TIER.TGIEx is set, raising that event's GIC line (level, until the flag is cleared);
++ *  - counter clear on TGRA/B/C/D compare match (TCR.CCLR), overflow (TCFV / TCIEV);
++ *  - TSR flags cleared by writing 0.
++ *
++ * Counting is evaluated lazily from the virtual clock; one QEMUTimer per channel fires at
++ * the next compare/overflow. Offsets follow the RZ/A1H hardware manual's MTU2 map
++ * (TGRC_3 0x224, TGRD_3 0x226, TGRC_4 0x228, TGRD_4 0x22A). Note mtu2.c labels 0x224 as
++ * TGRC_4; that disagrees with this table and is unresolved [INF].
++ *
++ * Clock: 32 MHz (mtu2.c's value, derived for the IC-7300); the IC-705's exact P0phi is
++ * not yet confirmed.
++ */
++#include "qemu/osdep.h"
++#include "qemu/timer.h"
++#include "qemu/module.h"
++#include "hw/core/irq.h"
++#include "hw/core/sysbus.h"
++#include "qom/object.h"
++#include "rz_a1h.h"
++#include "rza1h_debug.h"
++
++#define MTU2G_FREQ_HZ 32000000ULL
++#define MTU2G_NCH 5
++
++OBJECT_DECLARE_SIMPLE_TYPE(RZA1HMtu2gState, RZA1H_MTU2G)
++
++/* Per-channel register offsets (-1 = not present). */
++typedef struct {
++    int tcr, tier, tsr, tcnt, tgr[4];
++    int cst_bit;            /* bit in TSTR */
++    int irq_base;           /* GIC ID of TGIxA; B,C,D follow (+1,+2,+3), V at irq_v */
++    int irq_v;
++    int ntgr;
++} Mtu2gCh;
++
++static const Mtu2gCh mtu2g_ch[MTU2G_NCH] = {
++    /* ch0 */ { 0x300, 0x304, 0x305, 0x306, { 0x308, 0x30a, 0x30c, 0x30e }, 0, 139, 143, 4 },
++    /* ch1 */ { 0x380, 0x384, 0x385, 0x386, { 0x388, 0x38a, -1, -1 },       1, 146, 148, 2 },
++    /* ch2 */ { 0x000, 0x004, 0x005, 0x006, { 0x008, 0x00a, -1, -1 },       2, 150, 152, 2 },
++    /* ch3 */ { 0x200, 0x208, 0x22c, 0x210, { 0x218, 0x21a, 0x224, 0x226 }, 6, 154, 158, 4 },
++    /* ch4 */ { 0x201, 0x209, 0x22d, 0x212, { 0x21c, 0x21e, 0x228, 0x22a }, 7, 159, 163, 4 },
++};
++#define MTU2G_TSTR 0x280
++
++struct RZA1HMtu2gState {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;
++    uint8_t regs[RZA1H_MTU2_SIZE];
++    /* lazy counter state */
++    int64_t base_ns[MTU2G_NCH];
++    uint32_t base_cnt[MTU2G_NCH];
++    QEMUTimer *timer[MTU2G_NCH];
++    uint32_t tgt_cnt[MTU2G_NCH];  /* count value at the scheduled event (0x10000 = overflow) */
++    int64_t tgt_ns[MTU2G_NCH];
++    qemu_irq irq[MTU2G_NCH][5];   /* A,B,C,D,V */
++};
++
++static uint16_t r16(RZA1HMtu2gState *s, int off)
++{
++    return s->regs[off] | (s->regs[off + 1] << 8);   /* little-endian bus */
++}
++
++static void w16(RZA1HMtu2gState *s, int off, uint16_t v)
++{
++    s->regs[off] = v; s->regs[off + 1] = v >> 8;
++}
++
++static bool running(RZA1HMtu2gState *s, int c)
++{
++    return s->regs[MTU2G_TSTR] & (1 << mtu2g_ch[c].cst_bit);
++}
++
++static uint64_t tick_ns(RZA1HMtu2gState *s, int c)
++{
++    static const int div[8] = { 1, 4, 16, 64, 256, 1024, 1, 1 };
++    int tpsc = s->regs[mtu2g_ch[c].tcr] & 7;
++    return (1000000000ULL * div[tpsc]) / MTU2G_FREQ_HZ ?: 1;
++}
++
++static uint16_t cur_tcnt(RZA1HMtu2gState *s, int c)
++{
++    if (!running(s, c)) {
++        return s->base_cnt[c];
++    }
++    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    return (s->base_cnt[c] + (now - s->base_ns[c]) / tick_ns(s, c)) & 0xffff;
++}
++
++static void freeze(RZA1HMtu2gState *s, int c)
++{
++    s->base_cnt[c] = cur_tcnt(s, c);
++    s->base_ns[c] = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++}
++
++static void update_irqs(RZA1HMtu2gState *s, int c)
++{
++    const Mtu2gCh *ch = &mtu2g_ch[c];
++    uint8_t act = s->regs[ch->tsr] & s->regs[ch->tier];
++    for (int i = 0; i < 4; i++) {
++        qemu_set_irq(s->irq[c][i], (act >> i) & 1);
++    }
++    qemu_set_irq(s->irq[c][4], (act >> 4) & 1);
++}
++
++/* Schedule the next compare-match/overflow event of channel c. */
++static void schedule(RZA1HMtu2gState *s, int c)
++{
++    const Mtu2gCh *ch = &mtu2g_ch[c];
++    if (!running(s, c)) {
++        timer_del(s->timer[c]);
++        return;
++    }
++    uint16_t now = cur_tcnt(s, c);
++    uint32_t best = 0x10000 - now;                      /* overflow */
++    for (int i = 0; i < ch->ntgr; i++) {
++        uint16_t tg = r16(s, ch->tgr[i]);
++        uint32_t d = (uint16_t)(tg - now);
++        if (d == 0) {
++            d = 0x10000;
++        }
++        if (d < best) {
++            best = d;
++        }
++    }
++    s->tgt_cnt[c] = now + best;
++    s->tgt_ns[c] = s->base_ns[c] + ((int64_t)((uint16_t)(now - s->base_cnt[c])) + best) * tick_ns(s, c);
++    timer_mod(s->timer[c], s->tgt_ns[c]);
++}
++
++static void fire(void *opaque, int c)
++{
++    RZA1HMtu2gState *s = opaque;
++    const Mtu2gCh *ch = &mtu2g_ch[c];
++    int64_t now_ns = s->tgt_ns[c];
++    uint16_t now = s->tgt_cnt[c] & 0xffff;
++    int cclr = s->regs[ch->tcr] >> 5;
++    bool clear = false;
++
++    for (int i = 0; i < ch->ntgr; i++) {
++        if (r16(s, ch->tgr[i]) == now) {
++            s->regs[ch->tsr] |= 1 << i;
++            if ((i == 0 && cclr == 1) || (i == 1 && cclr == 2) ||
++                (i == 2 && cclr == 5) || (i == 3 && cclr == 6)) {
++                clear = true;
++            }
++            rza1h_debug("mtu2", "ch%d TGI%c match tcnt=%#x (GIC %d)%s", c, 'A' + i, now,
++                        ch->irq_base + i, (s->regs[ch->tier] >> i) & 1 ? "" : " [masked]");
++        }
++    }
++    if (now == 0) {
++        s->regs[ch->tsr] |= 1 << 4;
++    }
++    if (clear) {
++        s->base_cnt[c] = 0;
++        s->base_ns[c] = now_ns;
++    } else {
++        s->base_cnt[c] = now;
++        s->base_ns[c] = now_ns;
++    }
++    update_irqs(s, c);
++    schedule(s, c);
++}
++
++static void fire0(void *o) { fire(o, 0); }
++static void fire1(void *o) { fire(o, 1); }
++static void fire2(void *o) { fire(o, 2); }
++static void fire3(void *o) { fire(o, 3); }
++static void fire4(void *o) { fire(o, 4); }
++
++static int chan_of_tcnt(int off)
++{
++    for (int c = 0; c < MTU2G_NCH; c++) {
++        if (off == mtu2g_ch[c].tcnt || off == mtu2g_ch[c].tcnt + 1) {   /* +0 low, +1 high */
++            return c;
++        }
++    }
++    return -1;
++}
++
++static uint64_t mtu2g_read(void *opaque, hwaddr off, unsigned size)
++{
++    RZA1HMtu2gState *s = opaque;
++    int c = chan_of_tcnt(off);
++    if (c >= 0) {
++        uint16_t v = cur_tcnt(s, c);
++        if (size == 2) {
++            return v;
++        }
++        return off == mtu2g_ch[c].tcnt ? v & 0xff : v >> 8;
++    }
++    if (size == 2) {
++        return r16(s, off);
++    }
++    if (size == 4) {
++        return r16(s, off) | ((uint32_t)r16(s, off + 2) << 16);
++    }
++    return s->regs[off];
++}
++
++static void mtu2g_write(void *opaque, hwaddr off, uint64_t v, unsigned size)
++{
++    RZA1HMtu2gState *s = opaque;
++    int c;
++
++    /* snapshot all counters before any configuration change */
++    for (c = 0; c < MTU2G_NCH; c++) {
++        freeze(s, c);
++    }
++    if (off == MTU2G_TSTR && size == 1) {
++        s->regs[off] = v;
++    } else if ((c = chan_of_tcnt(off)) >= 0) {
++        s->base_cnt[c] = size == 2 ? v & 0xffff : (off == mtu2g_ch[c].tcnt
++                         ? (s->base_cnt[c] & 0xff00) | (v & 0xff)
++                         : ((v & 0xff) << 8) | (s->base_cnt[c] & 0xff));
++    } else {
++        bool is_tsr = false;
++        for (c = 0; c < MTU2G_NCH; c++) {
++            if (off == mtu2g_ch[c].tsr && size == 1) {
++                /* flags clear on writing 0; bits written 1 keep their value */
++                s->regs[off] &= (v | 0xc0);
++                is_tsr = true;
++            }
++        }
++        if (!is_tsr) {
++            if (size == 1) {
++                s->regs[off] = v;
++            } else if (size == 2) {
++                w16(s, off, v);
++            } else {
++                w16(s, off, v); w16(s, off + 2, v >> 16);
++            }
++        }
++    }
++    for (c = 0; c < MTU2G_NCH; c++) {
++        update_irqs(s, c);
++        schedule(s, c);
++    }
++}
++
++static const MemoryRegionOps mtu2g_ops = {
++    .read = mtu2g_read,
++    .write = mtu2g_write,
++    .valid.min_access_size = 1,
++    .valid.max_access_size = 4,
++    .impl.min_access_size = 1,
++    .impl.max_access_size = 4,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++};
++
++static void mtu2g_reset(DeviceState *dev)
++{
++    RZA1HMtu2gState *s = RZA1H_MTU2G(dev);
++    memset(s->regs, 0, sizeof(s->regs));
++    for (int c = 0; c < MTU2G_NCH; c++) {
++        static const int tgr_reset = 0xffff;
++        s->base_cnt[c] = 0;
++        s->base_ns[c] = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++        for (int i = 0; i < mtu2g_ch[c].ntgr; i++) {
++            w16(s, mtu2g_ch[c].tgr[i], tgr_reset);
++        }
++        s->regs[mtu2g_ch[c].tsr] = 0xc0;
++        timer_del(s->timer[c]);
++    }
++}
++
++static void mtu2g_init(Object *obj)
++{
++    RZA1HMtu2gState *s = RZA1H_MTU2G(obj);
++    static void (*const cb[MTU2G_NCH])(void *) = { fire0, fire1, fire2, fire3, fire4 };
++
++    memory_region_init_io(&s->iomem, obj, &mtu2g_ops, s, "rza1h-mtu2g", RZA1H_MTU2_SIZE);
++    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
++    for (int c = 0; c < MTU2G_NCH; c++) {
++        s->timer[c] = timer_new_ns(QEMU_CLOCK_VIRTUAL, cb[c], s);
++        for (int i = 0; i < 5; i++) {
++            sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq[c][i]);
++        }
++    }
++}
++
++/* GIC ID of event i (0..4 = A,B,C,D,V) of channel c, or -1 if the channel lacks it. */
++int rza1h_mtu2g_irq_id(int c, int i)
++{
++    const Mtu2gCh *ch = &mtu2g_ch[c];
++    if (i == 4) {
++        return ch->irq_v;
++    }
++    return i < ch->ntgr ? ch->irq_base + i : -1;
++}
++
++static void mtu2g_class_init(ObjectClass *oc, const void *data)
++{
++    device_class_set_legacy_reset(DEVICE_CLASS(oc), mtu2g_reset);
++}
++
++static const TypeInfo mtu2g_info = {
++    .name = TYPE_RZA1H_MTU2G,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(RZA1HMtu2gState),
++    .instance_init = mtu2g_init,
++    .class_init = mtu2g_class_init,
++};
++
++static void mtu2g_register(void)
++{
++    type_register_static(&mtu2g_info);
++}
++
++type_init(mtu2g_register)
+diff --git a/qemu-machine/src/rz_a1h.c b/qemu-machine/src/rz_a1h.c
+index 2342e9e..ab1e41b 100644
+--- a/qemu-machine/src/rz_a1h.c
++++ b/qemu-machine/src/rz_a1h.c
+@@ -45,6 +45,7 @@
+ #include "target/arm/cpu-qom.h"
+ 
+ #include "rz_a1h.h"
++#include "rza1h_debug.h"
+ 
+ /* Every I/O region notes/memory-map.md documents, mirroring
+  * emu/board.py's IO_REGIONS list exactly (same names, same comments on
+@@ -331,6 +332,22 @@ static void rza1h_init(MachineState *machine)
+      * ring has drained, so its "ring now empty" flag-clear (main_idle_
+      * loop's own entry-wait gate, 0x203906ed) never runs even once the
+      * ring genuinely is empty. See mtu2.c's own comment. */
++    if (rza1h_board_ic705()) {
++        /* IC-705: general register-accurate MTU2 (mtu2g.c), all channels/events wired */
++        mtu2 = qdev_new(TYPE_RZA1H_MTU2G);
++        sysbus_realize_and_unref(SYS_BUS_DEVICE(mtu2), &error_fatal);
++        sysbus_mmio_map_overlap(SYS_BUS_DEVICE(mtu2), 0, RZA1H_MTU2_BASE, 0);
++        for (int c = 0; c < 5; c++) {
++            for (int e = 0; e < 5; e++) {
++                int id = rza1h_mtu2g_irq_id(c, e);
++                if (id >= 0) {
++                    sysbus_connect_irq(SYS_BUS_DEVICE(mtu2), c * 5 + e,
++                                       qdev_get_gpio_in(gic, id - RZA1H_GIC_NUM_INTERNAL));
++                }
++            }
++        }
++        goto mtu2_done;
++    }
+     mtu2 = qdev_new(TYPE_RZA1H_MTU2);
+     sysbus_realize_and_unref(SYS_BUS_DEVICE(mtu2), &error_fatal);
+     sysbus_mmio_map_overlap(SYS_BUS_DEVICE(mtu2), 0, RZA1H_MTU2_BASE, 0);
+@@ -352,6 +369,7 @@ static void rza1h_init(MachineState *machine)
+     sysbus_connect_irq(SYS_BUS_DEVICE(mtu2), 5,
+                        qdev_get_gpio_in(gic,
+                            RZA1H_MTU2_TGI1A_IRQ - RZA1H_GIC_NUM_INTERNAL));
++mtu2_done:
+ 
+     /* riic.c -- upgraded from a bare RAM region to a real device,
+      * 2026-09-08 second pass, once body.bin's own cold-boot RIIC2 read
+@@ -407,7 +425,7 @@ static void rza1h_init(MachineState *machine)
+          * channel leaves it created but unmapped, a normal, inert QEMU
+          * idiom (rza1h_scif_init's own comment explains why it can't be
+          * skipped at creation time instead). */
+-        if (i == 5) {
++        if (i == 5 && !rza1h_board_ic705()) {
+             sysbus_mmio_map_overlap(SYS_BUS_DEVICE(scif), 1,
+                                     RZA1H_SCIF5_DSP_RETRY_ARM_BASE, 0);
+         }
+@@ -519,7 +537,7 @@ static void rza1h_init(MachineState *machine)
+ 
+ static void rza1h_machine_init(MachineClass *mc)
+ {
+-    mc->desc = "IC-7300 / Renesas RZ/A1H (research, incomplete)";
++    mc->desc = "IC-7300 / IC-705 (RZA1H_BOARD=ic705) Renesas RZ/A1H (research, incomplete)";
+     mc->init = rza1h_init;
+     mc->default_cpu_type = ARM_CPU_TYPE_NAME("cortex-a9");
+     mc->max_cpus = 1;
+diff --git a/qemu-machine/src/rz_a1h.h b/qemu-machine/src/rz_a1h.h
+index 9aac7c4..cba3ff6 100644
+--- a/qemu-machine/src/rz_a1h.h
++++ b/qemu-machine/src/rz_a1h.h
+@@ -134,6 +134,8 @@
+ #define RZA1H_MTU2_TGI4D_IRQ 162 /* added 2026-09-21, see mtu2.c's own comment --
+                                   * rspi2_wait_ready's own completion callback */
+ #define TYPE_RZA1H_MTU2 "rza1h-mtu2"
++#define TYPE_RZA1H_MTU2G "rza1h-mtu2g"  /* general model, IC-705 port */
++int rza1h_mtu2g_irq_id(int c, int i);
+ 
+ /* riic.c -- matches emu/peripherals/riic.py's per-instance base addresses
+  * (RIIC0-2, stride 0x400). RIIC2 is the diode-matrix EEPROM's controller,
+diff --git a/qemu-machine/src/rza1h_debug.h b/qemu-machine/src/rza1h_debug.h
+index e356640..72eeaf4 100644
+--- a/qemu-machine/src/rza1h_debug.h
++++ b/qemu-machine/src/rza1h_debug.h
+@@ -93,4 +93,13 @@ static inline void rza1h_debug(const char *dev_name, const char *fmt, ...)
+     fflush(stderr);
+ }
+ 
++/* Board selection (IC-705 port): RZA1H_BOARD=ic705 disables the device-side helpers that
++ * read/write IC-7300 firmware RAM at fixed addresses (SCIF3 front-panel and SCIF5 DSP
++ * responders); those channels then behave as plain UARTs. Default: ic7300. */
++static inline bool rza1h_board_ic705(void)
++{
++    const char *b = getenv("RZA1H_BOARD");
++    return b && !strcmp(b, "ic705");
++}
++
+ #endif /* RZA1H_DEBUG_H */
+diff --git a/qemu-machine/src/scif.c b/qemu-machine/src/scif.c
+index 11f4f4c..6d47fc9 100644
+--- a/qemu-machine/src/scif.c
++++ b/qemu-machine/src/scif.c
+@@ -262,6 +262,12 @@ struct RZA1HScifState {
+      * user's own request, same idiom as dsp_ack_timer above. See
+      * FRONTPANEL_ACK_DELAY_NS's own comment. */
+     ptimer_state *frontpanel_ack_timer;
++    /* IC-705 port: injected RX byte queue (models a device on the far end) and the
++     * sub-CPU ("ICOM4075S") status pusher on channel 3. */
++    uint8_t inj_q[1024];
++    int inj_head, inj_tail;
++    QEMUTimer *ic705_sub_timer;
++    uint8_t ic705_status[54];
+     uint8_t  frontpanel_pending_ack_type; /* stashed for the timer callback,
+                                             * since ptimer callbacks only
+                                             * get `opaque`, not an argument */
+@@ -430,6 +436,69 @@ static uint64_t scif_byte_time_ns(RZA1HScifState *s)
+     return bit_ns * 10;
+ }
+ 
++/* ---- IC-705 port: injected RX bytes ------------------------------------------------- */
++static void rza1h_scif_inj_load(RZA1HScifState *s)
++{
++    if (!s->rx_pending && s->inj_head != s->inj_tail && (s->scr & SCR_RE)) {
++        s->frdr = s->inj_q[s->inj_tail];
++        s->inj_tail = (s->inj_tail + 1) % (int)sizeof(s->inj_q);
++        s->rx_pending = true;
++        if (s->scr & SCR_RIE) {
++            qemu_irq_lower(s->irq_rx);
++            qemu_irq_raise(s->irq_rx);
++        }
++    }
++}
++
++static void rza1h_scif_inj_push(RZA1HScifState *s, const uint8_t *b, int n)
++{
++    for (int i = 0; i < n; i++) {
++        int nh = (s->inj_head + 1) % (int)sizeof(s->inj_q);
++        if (nh == s->inj_tail) {
++            break;
++        }
++        s->inj_q[s->inj_head] = b[i];
++        s->inj_head = nh;
++    }
++    rza1h_scif_inj_load(s);
++}
++
++/* Sub-CPU status frame, as the ARM's SCIF3 RXI handler (0x20120CAC) parses it:
++ *   FC <offset> <data...> FE ; bytes 0xFB..0xFF in the body are sent as FF,(b+16).
++ * The data lands in a 54-byte status mirror at offset. Content is unknown so far: zeros,
++ * overridable byte-by-byte via RZA1H_IC705_SUBSTAT="hexbytes". */
++#define IC705_SUB_PERIOD_NS 10000000
++static void rza1h_ic705_sub_tick(void *opaque)
++{
++    RZA1HScifState *s = opaque;
++    uint8_t f[2 + 2 * 55 + 1];
++    int n = 0;
++
++    if ((s->scr & SCR_RE) && s->inj_head == s->inj_tail && !s->rx_pending) {
++        const char *e = getenv("RZA1H_IC705_SUBSTAT");
++        if (e) {
++            for (int i = 0; i < 54 && e[2 * i] && e[2 * i + 1]; i++) {
++                char h[3] = { e[2 * i], e[2 * i + 1], 0 };
++                s->ic705_status[i] = strtoul(h, NULL, 16);
++            }
++        }
++        f[n++] = 0xFC;
++        for (int i = -1; i < 54; i++) {
++            uint8_t b = i < 0 ? 0 : s->ic705_status[i];
++            if (b >= 0xFB) {
++                f[n++] = 0xFF;
++                f[n++] = b + 16;
++            } else {
++                f[n++] = b;
++            }
++        }
++        f[n++] = 0xFE;
++        rza1h_debug("scif3", "ic705 sub-cpu: status frame (%d bytes)", n);
++        rza1h_scif_inj_push(s, f, n);
++    }
++    timer_mod(s->ic705_sub_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + IC705_SUB_PERIOD_NS);
++}
++
+ static uint64_t rza1h_scif_read(void *opaque, hwaddr offset, unsigned size)
+ {
+     RZA1HScifState *s = RZA1H_SCIF(opaque);
+@@ -1158,6 +1227,11 @@ static void rza1h_scif_write(void *opaque, hwaddr offset, uint64_t value,
+             qemu_irq_lower(s->irq_tx);
+         }
+         s->scr = value;
++        if (s->rx_pending && (value & SCR_RIE)) {
++            qemu_irq_lower(s->irq_rx);
++            qemu_irq_raise(s->irq_rx);
++        }
++        rza1h_scif_inj_load(s);
+         break;
+     case REG_FTDR:
+         byte = value;
+@@ -1166,7 +1240,7 @@ static void rza1h_scif_write(void *opaque, hwaddr offset, uint64_t value,
+          * order, so rza1h_scif5_dsp_ack can answer based on what was
+          * actually asked instead of firing one fixed canned class always.
+          * See that function's own comment for the byte-order derivation. */
+-        if (s->channel == 5) {
++        if (s->channel == 5 && !rza1h_board_ic705()) {
+             if (s->scif5_cmd_pos >= 0 && s->scif5_cmd_pos < 4) {
+                 s->scif5_cmd_buf[s->scif5_cmd_pos++] = byte;
+             } else {
+@@ -1245,7 +1319,7 @@ static void rza1h_scif_write(void *opaque, hwaddr offset, uint64_t value,
+          * whole question without needing to model that pacing: pump_tick
+          * clears bit 0x40 itself before sending, so with nothing setting
+          * it again, the ping fires exactly once and the driver settles. */
+-        if (s->channel == 3) {
++        if (s->channel == 3 && !rza1h_board_ic705()) {
+             if (byte == 0xFE) {
+                 s->tx_frame_pos = 0;
+             } else if (s->tx_frame_pos == 0) {
+@@ -1451,7 +1525,11 @@ static void rza1h_scif_realize(DeviceState *dev, Error **errp)
+     ptimer_set_freq(s->frontpanel_ack_timer, 1000000000);
+     ptimer_transaction_commit(s->frontpanel_ack_timer);
+ 
+-    if (s->channel == 3) {
++    if (s->channel == 3 && rza1h_board_ic705()) {
++        s->ic705_sub_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, rza1h_ic705_sub_tick, s);
++        timer_mod(s->ic705_sub_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + IC705_SUB_PERIOD_NS);
++    }
++    if (s->channel == 3 && !rza1h_board_ic705()) {
+         qemu_chr_fe_set_handlers(&s->fpctl, rza1h_scif3_fpctl_can_receive,
+                                  rza1h_scif3_fpctl_receive, NULL, NULL, s, NULL, true);
+         s->fp_input = qemu_input_handler_register(dev, &rza1h_scif3_fp_input_handler);
