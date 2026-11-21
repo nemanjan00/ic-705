@@ -9,7 +9,7 @@ what the radio does.
 |---|---|---|
 | ARM function-level (call one firmware function, log MMIO) | **working** | `tools/arm_emu.py` (Unicorn 2.1.4) |
 | ARM full-system (boot RTX, UI) | not started | QEMU RZ/A1 machine from jeskko/ic7300-homebrew [EXT] is the starting point; needs VDC5, GIC, OSTM, SCIF models |
-| DV DSP (C55x) | not started | no ready-made C55x emulator; a focused interpreter for the instructions used by `gmsk_mod_bit`/`fir` would let us test a 4FSK table swap |
+| DV DSP (C55x) | **working for the modulator** | `tools/c55_emu.py`: interprets the IDA-decoded instruction stream; DSPLIB `fir` is emulated at high level |
 | Main DSP, FPGA | out of reach for now | chip/format not identified |
 
 ## `tools/arm_emu.py`
@@ -36,3 +36,18 @@ Bit rate in clock-sync mode is Pφ / (4 · 2^(2n−1) · (N+1)) = Pφ / 6656; wi
 P1φ = 66.67 MHz → **≈ 10 kbit/s** [INF: clock source not confirmed]. The routine also
 sets pin-function registers for ports 4, 5, 6, 7 and 10 (`0xFCFE3x2C`). Whether this
 link is the DV DSP host link is [INF] (see `DV_DSP.md`).
+
+## `tools/c55_emu.py` (DV DSP) [VM]
+
+- Executes the instruction list exported from IDA (`address, size, bytes, text`)
+  against a word memory built from the DV DSP boot table (`dspB.mem`).
+- Implements only the forms used by `gmsk_mod_bit` (`aadd/amar/rpt/mov/neg/bcc/b/
+  cmpu/xccpart/nop/call/ret`) and raises `NotImplementedError` on anything else.
+- `call fir` (`0xAAC8`, TI DSPLIB `fir`) is high-level emulated: Q15, FRCT, round to
+  nearest, history kept per delay-buffer address.
+- IDA's stack-variable notation (`*SP(#16h+var_4)`) is in **bytes**: word offset = /2.
+- `xccpart` is modelled as "condition the next instruction". The firmware uses two
+  encodings (`0x96..`, `0x9E..`) whose placement suggests they differ. With the invert
+  flag at its init value (0), both readings give the same stock output, and the 4FSK
+  patch removes both instructions.
+- **Positive control:** stock `gmsk_mod_bit` equals an independent GMSK model exactly.

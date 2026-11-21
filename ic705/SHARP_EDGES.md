@@ -28,3 +28,21 @@ Symptom → cause → fix. Append the moment one bites.
 - **mbelib naming is swapped-looking:** `ambe3600x2400_const.h` (D-STAR) holds tables
   called `AmbePlus*`; `ambe3600x2450_const.h` (AMBE+2/DMR) holds `Ambe*`. Label by
   file, not by symbol name.
+
+## Container / re-seal
+
+- **Padding a shorter DSP stream to the old slot size breaks sq6emm's decoder**
+  ("Unexpected unconsumed bytes in dsp"). Icom's tail streams fill their field exactly.
+  Store the new stream at its exact length, update header `0x54`, shift the WLAN group,
+  and re-check the size law. [FW]
+
+## Emulation / DSP numerics
+
+- **RRC 4FSK clips at amp 0x5000** for some dibit sequences: the worst-case polyphase
+  gain is 1.73, so the no-clip bound is amp ≤ `0x49F7`. A clean random test passing is
+  not proof; compute the bound. [VM]
+- **No C55x assembler available** (TI's public CGT URL returns "Not found"; binutils
+  has only C54x). Assemble by example from encodings already in the image, and verify
+  every new instruction by letting IDA decode it before running it.
+- **DMR sync detection alone doesn't prove 4-level correctness**: sync words use only
+  ±3 symbols. Use dibit-exact recovery as the evidence.

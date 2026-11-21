@@ -1,6 +1,6 @@
 # Can the IC-705 do DMR?
 
-## Verdict (2026-11-21)
+## Verdict (2026-11-21, updated after PoC)
 
 **Technically yes, as a firmware project. It is not a settings change.** There is
 no hidden DMR support: the radio's vocoder knows only D-STAR AMBE [FW]. Everything
@@ -18,6 +18,16 @@ Two things are not known yet:
 
 Biggest effort: **a software AMBE+2 codec**. Biggest legal question: **AMBE+2
 licensing/patents** (the owner's call).
+
+**PoC ([POC.md](POC.md)):** the DV DSP's own modulator, patched and run in a C55x
+emulator, emits DMR 4FSK that dsd-neo locks onto, frame-for-frame identical to an ideal
+reference. It ships inside a re-sealed `.dat` that an independent decoder accepts.
+That leaves the hard parts:
+
+- **Deviation (R3):** the DV DSP alone reaches only about 41 % of DMR's ±1944 Hz.
+  The gain after it has to change for this mode.
+- **Host dibit feed:** the DV DSP's caller still passes D-STAR bits.
+- **AMBE+2** (R1).
 
 Practical scope: **simplex / hotspot DMR, one timeslot, continuous carrier.**
 True TDMA bursting on a repeater uplink depends on T/R switching speed and is the
@@ -40,12 +50,12 @@ least certain part.
 | # | Requirement | Status | Evidence |
 |---|---|---|---|
 | R1 | AMBE+2 encode/decode | **Not in hardware.** Needs a software codec. | [FW] |
-| R2 | 4FSK TX modulator | Feasible: replace the GMSK pulse table and bit→level map in `gmsk_mod_bit` with RRC taps and a 2-bit→4-level map. The output ring and I2S path stay as they are. | structure [FW], change [INF] |
-| R3 | TX deviation ±1.944 kHz | **Open.** At the D-STAR scale the peak sample is 0.80 FS for ±1.2 kHz, so ±1.944 kHz would need about 1.3 FS unless the next stage's gain is set per mode. | [FW] scale, [INF] mapping |
+| R2 | 4FSK TX modulator | **Done in emulation** ([POC.md](POC.md)). A 6-site patch plus a new boot section turns `gmsk_mod_bit` into a DMR 4FSK modulator. dsd-neo decodes its emulated output identically to an ideal reference. | [VM] |
+| R3 | TX deviation ±1.944 kHz | **Blocker inside the DV DSP.** With RRC peak-to-average, the worst-case no-clip outer level is 0.53 FS ≈ **794 Hz** at the D-STAR scale (0.80 FS = 1.2 kHz), **2.45× short**. The stage after the DV DSP must raise its gain for this mode. | [VM] numbers, [INF] D-STAR-scale linearity |
 | R4 | RX discriminator, ≥ ±4.8 kHz channel | Rate is OK: the discriminator arrives at 48 kHz, 10 samples/symbol. Width is likely OK: the FPGA→DSP baseband is reported as 12 kHz wide. | [FW] rate, [EXT] width |
 | R5 | TDMA timing | Simplex/hotspot: continuous TX with one used slot. Repeater uplink: needs about 30 ms T/R keying. | [INF] |
 | R6 | DMR framing, FEC, LC | Software only (ARM ICAP app or DV DSP) | [INF] |
-| R7 | Patch delivery | ARM: existing `repack`. DV DSP: lives in the DSP MD5 domain with its own autokey; format is documented, re-seal not implemented. | [FW]/[EXT] |
+| R7 | Patch delivery | **Done at file level**: `tools/dsp_reseal.py` re-seals the DSP group (exact-length stream, field `0x54`, size law). sq6emm's independent decoder accepts identity and patched files. Radio acceptance [HW] unverified. | [FW] |
 | R8 | ARM↔DV DSP bandwidth | Candidate link SCIF5, clock-sync, about 10 kbit/s. Enough for vocoder frames (2450–3600 bit/s), too tight for raw dibits plus overhead. | [VM] config, [INF] rate |
 
 ## R1 — vocoder tables

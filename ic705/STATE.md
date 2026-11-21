@@ -4,12 +4,15 @@ Tags: [FW] firmware static · [HW] radio · [VM] emulator · [EXT] outside · [I
 
 ## Now
 
-- **2026-11-21: DMR verdict written** (`DMR_FEASIBILITY.md`): feasible as a firmware
-  project. There is no AMBE+2 in hardware [FW]. The discriminator and modulator at
-  48 kHz / 10 sps exist in the DV DSP [FW]. Deviation reach (R3) and DV RX width
-  (R4) are still open.
-- **Next:** R3 needs a radio: key DV into a dummy load and measure deviation. Without a
-  radio: decode the SCIF5 ↔ DV DSP host protocol (item 3 in the feasibility doc).
+- **2026-11-21: DMR modulator PoC done [VM]** (`POC.md`). The patched DV DSP `gmsk_mod_bit`
+  produces DMR 4FSK that dsd-neo locks onto, identical to an ideal reference. The
+  patched DSP group is re-sealed into a `.dat` that the independent decoder accepts
+  (`out/705E140_dv4fsk_EXPERIMENTAL_DO_NOT_FLASH.dat`, MD5 `9601415f…`, gitignored, not
+  for flashing).
+- **R3 quantified:** the DV DSP alone reaches ≈ 794 Hz of the 1944 Hz needed (2.45× short).
+  Next (static): find the gain stage after the DV DSP's I2S0-R (main DSP / FPGA) and
+  how DV vs FM modes set it. Or: DSP-side 4FSK demodulator PoC on I2S0-L, and the
+  host dibit feed.
 
 ## Backups on record
 
@@ -27,3 +30,5 @@ None — no radio access so far; static analysis of `705E140.dat` (MD5 `2c9c1d7f
 - DV DSP in IDA (`TMS32055`): vectors, I2S0 roles, GMSK TX chain, host queue [FW].
 - R1: D-STAR AMBE codebooks found (positive control), no AMBE+2 anywhere [FW].
 - ARM Unicorn harness with CRC32 positive control; SCIF5 init traced [VM].
+- C55x micro-emulator, positive control vs GMSK model; 4FSK patch, dsd-neo validation [VM].
+- DSP-group re-seal (identity + patched), accepted by the independent decoder [FW].
