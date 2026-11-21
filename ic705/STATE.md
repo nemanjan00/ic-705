@@ -19,6 +19,10 @@ Tags: [FW] firmware static · [HW] radio · [VM] emulator · [EXT] outside · [I
   SPI-NOR; an unchanged version is silently skipped; a wrong IV writes garbage.
   IV rule solved: IV = byte sum of header version fields [FW].
 
+- **Full-radio emulation started:** porting jeskko/ic7300-homebrew's QEMU RZ/A1H machine.
+  IC-705 flash image builder done (`tools/build_705_flash.py`). **Blocked:** building
+  QEMU (`qemu-machine/setup.sh`) needs the owner's approval.
+
 ## Backups on record
 
 None — no radio access so far; static analysis of `705E140.dat` (MD5 `2c9c1d7f…`).

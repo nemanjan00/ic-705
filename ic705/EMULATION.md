@@ -9,7 +9,7 @@ what the radio does.
 |---|---|---|
 | ARM function-level (call one firmware function, log MMIO) | **working** | `tools/arm_emu.py` (Unicorn 2.1.4) |
 | ARM updater (DSP flash writer) | **working** | `tools/arm_dsp_update_emu.py`: firmware code with HLE for SD read + SPI-NOR model |
-| ARM full-system (boot RTX, UI) | not started | QEMU RZ/A1 machine from jeskko/ic7300-homebrew [EXT] is the starting point; needs VDC5, GIC, OSTM, SCIF models |
+| ARM full-system (boot RTX, UI) | **in progress**: port of the IC-7300 QEMU machine | see "Full-system plan" below |
 | DV DSP (C55x) | **working for the modulator** | `tools/c55_emu.py`: interprets the IDA-decoded instruction stream; DSPLIB `fir` is emulated at high level |
 | Main DSP, FPGA | out of reach for now | chip/format not identified |
 
@@ -61,3 +61,33 @@ return via LR with Thumb interworking). The DSP flash writer runs as real code. 
 SPI-transaction functions (`0x20069F30`, `0x2006A0CC`) are replaced; the latter are
 backed by a 16 MiB SPI-NOR model that enforces WREN before erase/program and AND-
 programs pages. Results are in `POC.md` (cases A–D). One run takes about 1 s.
+
+## Full-system plan (screen + peripherals)
+
+Base: `jeskko/ic7300-homebrew` `qemu-machine/` (MIT), a custom QEMU 11.1.1 machine for the
+same RZ/A1H. It boots stock IC-7300 firmware to the main screen, with GIC, OSTM, MTU2,
+GPIO, RIIC (+EEPROM, RTC), SCIF (front panel, DSP link), SDHI SD card, SPIBSC flash,
+WDT, DMAC, VDC5 compositing, an OpenVG rasterizer, and a GTK window with touch, keys and
+dial. Cloned at `~/icom/ic7300-homebrew` (outside this repo).
+
+IC-705 port, deltas to make (static evidence in brackets):
+
+1. **Flash image:** `tools/build_705_flash.py` → 16 MiB, main domain at 0 (reset vector
+   `18 F0 9F E5`), loaded with `-kernel`. Same XIP base `0x18000000` [FW].
+2. **Boot loader:** the IC-705 bootstrap copies a loader to `0x20004000` and unpacks main
+   to `0x20005000` (entry `0x20005060`) [EXT sq6emm]. Check that the machine's reset at
+   `0x18000000` takes this path unchanged.
+3. **Peripheral differences found so far:**
+   - DV DSP on a clock-synchronous SCIF5 (`SCSMR=0x82`) [VM], not the IC-7300's async DSP
+     UART.
+   - DSP/FPGA config flash on **RSPI4** [FW]. The 7300 machine only models RSPI2 (its FPGA).
+   - Sub-CPU (`"ICOM4075S"`) on SCIF3 with a `0x55` handshake [FW]; the 7300 front panel
+     is also on SCIF3.
+   - WLAN CC31xx (SPI, NWP), Bluetooth, GPS: absent, stubs.
+   - Display panel size and touch controller: to be read from the VDC5 setup the firmware
+     writes.
+4. **Dummies:** FPGA and both DSPs. The user agreed only a dummy FPGA is needed.
+
+Status: the QEMU build (`qemu-machine/setup.sh`: clone QEMU v11.1.1, symlink the sources,
+`configure --target-list=arm-softmmu`, ninja) **needs the owner's approval to run**; it
+was blocked by the session's permission policy.
