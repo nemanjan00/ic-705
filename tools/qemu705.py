@@ -44,6 +44,12 @@ def main():
     ap.add_argument('--debug', default='')
     ap.add_argument('--sd')
     ap.add_argument('--icount', default='shift=1')
+    ap.add_argument('--pins', default='3_9=0', help='RZA1H_PINS at reset (default: POWER held)')
+    ap.add_argument('--release-at', type=float, default=5, help='release POWER (P3_9) after N s')
+    ap.add_argument('--adc', default=','.join(['0x300'] * 8), help='RZA1H_ADC_VALS')
+    ap.add_argument('--dsfr', default='0')
+    ap.add_argument('--force-on', action='store_true',
+                    help='boot hook: force power-mode dispatcher 0x2007B7C0 a1=1 (full bring-up)')
     ap.add_argument('extra', nargs='*')
     a = ap.parse_args()
     sock = f'{SCR}/qmp705.sock'; log = f'{SCR}/qemu705_unimp.log'
@@ -55,12 +61,25 @@ def main():
     if a.icount != 'off': args += ['-icount', a.icount]
     if a.sd: args += ['-drive', f'if=sd,format=raw,file={a.sd}']
     args += a.extra
-    env = dict(os.environ, RZA1H_BOARD='ic705', RZA1H_DEBUG=a.debug)
+    env = dict(os.environ, RZA1H_BOARD='ic705', RZA1H_DEBUG=a.debug, RZA1H_PINS=a.pins,
+               RZA1H_ADC_VALS=a.adc, RZA1H_DSFR=a.dsfr)
+    if a.force_on:
+        args += ['-S', '-gdb', 'tcp::1240']
     p = subprocess.Popen(args, env=env, stdout=subprocess.DEVNULL, stderr=open(f'{SCR}/qemu705_stderr.log', 'w'))
     q = QMP(sock)
+    t0 = time.time()
+    if a.force_on:
+        import rsp
+        g = rsp.RSP(port=1240, timeout=120); g.cmd('?')
+        g.bp(0x2007B7C0); g.cont()
+        print('boot hook: dispatcher a1 =', g.regs()[0], '-> 1')
+        g.cmd('P0=01000000'); g.bp(0x2007B7C0, False); g._send(b'c')
+    released = False
     pcs = collections.Counter()
     for i in range(a.samples):
         time.sleep(a.secs / a.samples)
+        if not released and time.time() - t0 >= a.release_at:
+            q.cmd('qom-set', path='/machine/gpio', property='pins', value='3_9=1'); released = True
         pc, lr, psr, _ = regs(q)
         pcs[pc] += 1
         print(f't={a.secs/a.samples*(i+1):5.1f}s pc={pc:#010x} lr={lr:#010x} psr={psr}', flush=True)

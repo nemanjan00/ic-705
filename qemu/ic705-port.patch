@@ -1,5 +1,5 @@
 diff --git a/qemu-machine/patches/hw-arm-build.patch b/qemu-machine/patches/hw-arm-build.patch
-index 85a6e02..1284f35 100644
+index 85a6e02..9a2b11d 100644
 --- a/qemu-machine/patches/hw-arm-build.patch
 +++ b/qemu-machine/patches/hw-arm-build.patch
 @@ -22,6 +22,6 @@ index 4233a80..605fa4f 100644
@@ -7,11 +7,11 @@ index 85a6e02..1284f35 100644
   
   arm_common_ss.add(files('boot.c'))
 -+arm_common_ss.add(when: 'CONFIG_RZA1H', if_true: files('rz_a1h.c', 'ostm.c', 'spibsc.c', 'wdt.c', 'stbc.c', 'gpio.c', 'l2c.c', 'scif.c', 'mmc.c', 'sdhi.c', 'riic.c', 'mtu2.c', 'dmac.c', 'rspi2.c', 'openvg.c', 'rx8803.c', 'adc.c', 'vdc5.c', 'fake_dsp.c', 'fake_fpga.c', 'ssif.c'))
-++arm_common_ss.add(when: 'CONFIG_RZA1H', if_true: files('rz_a1h.c', 'ostm.c', 'spibsc.c', 'wdt.c', 'stbc.c', 'gpio.c', 'l2c.c', 'scif.c', 'mmc.c', 'sdhi.c', 'riic.c', 'mtu2.c', 'mtu2g.c', 'dmac.c', 'rspi2.c', 'openvg.c', 'rx8803.c', 'adc.c', 'vdc5.c', 'fake_dsp.c', 'fake_fpga.c', 'ssif.c'))
+++arm_common_ss.add(when: 'CONFIG_RZA1H', if_true: files('rz_a1h.c', 'ostm.c', 'spibsc.c', 'wdt.c', 'stbc.c', 'gpio.c', 'l2c.c', 'scif.c', 'mmc.c', 'sdhi.c', 'riic.c', 'mtu2.c', 'mtu2g.c', 'dmac.c', 'dmac_hi.c', 'rspi_gen.c', 'rspi2.c', 'openvg.c', 'rx8803.c', 'adc.c', 'vdc5.c', 'fake_dsp.c', 'fake_fpga.c', 'ssif.c'))
   
   hw_common_arch += {'arm': arm_common_ss}
 diff --git a/qemu-machine/setup.sh b/qemu-machine/setup.sh
-index 4fcbd09..23b9e2a 100755
+index 4fcbd09..60791a8 100755
 --- a/qemu-machine/setup.sh
 +++ b/qemu-machine/setup.sh
 @@ -27,7 +27,7 @@ echo "Symlinking sources..."
@@ -19,7 +19,7 @@ index 4fcbd09..23b9e2a 100755
  # so the gap was latent -- a from-scratch qemu-src/ checkout would have
  # failed to build). Keep this in sync with meson.build's files() list.
 -for f in rz_a1h.c rz_a1h.h rza1h_debug.h ostm.c spibsc.c wdt.c stbc.c gpio.c l2c.c scif.c mmc.c sdhi.c riic.c mtu2.c dmac.c rspi2.c openvg.c rx8803.c adc.c vdc5.c fake_dsp.c fake_dsp.h fake_fpga.c fake_fpga.h ssif.c; do
-+for f in rz_a1h.c rz_a1h.h rza1h_debug.h ostm.c spibsc.c wdt.c stbc.c gpio.c l2c.c scif.c mmc.c sdhi.c riic.c mtu2.c mtu2g.c dmac.c rspi2.c openvg.c rx8803.c adc.c vdc5.c fake_dsp.c fake_dsp.h fake_fpga.c fake_fpga.h ssif.c; do
++for f in rz_a1h.c rz_a1h.h rza1h_debug.h ostm.c spibsc.c wdt.c stbc.c gpio.c l2c.c scif.c mmc.c sdhi.c riic.c mtu2.c mtu2g.c dmac.c dmac_hi.c rspi_gen.c rspi2.c openvg.c rx8803.c adc.c vdc5.c fake_dsp.c fake_dsp.h fake_fpga.c fake_fpga.h ssif.c; do
      ln -sf "../../../src/$f" "$QEMU_SRC/hw/arm/$f"
  done
  
@@ -84,6 +84,215 @@ index bf2411b..2ade9c9 100644
      memcpy(&s->regs[offset], &value, size);
  }
  
+diff --git a/qemu-machine/src/dmac_hi.c b/qemu-machine/src/dmac_hi.c
+new file mode 100644
+index 0000000..9dfd6d9
+--- /dev/null
++++ b/qemu-machine/src/dmac_hi.c
+@@ -0,0 +1,203 @@
++/*
++ * RZ/A1H DMAC channels 8..15 -- generic model, written for the IC-705 port.
++ *
++ * dmac.c models channels 0..7 around the IC-7300's flows (SSIF streaming, SDHI, ch0
++ * completion). The IC-705 firmware also uses channel 10 (0xE8200484/0xE82004A8) for a
++ * buffer transfer paced by MTU2 channel 2 and waits for its completion (0x2011EBBC /
++ * 0x2011F254). This device covers the second register window (0xE8200400, 8 channels x
++ * 0x40) plus the common DCTRL/DSTAT block at +0x300 of that window:
++ *
++ *   SETEN with N0TB > 0: move N0TB bytes from N0SA to N0DA in CHCFG.DDS units
++ *   (SAD/DAD = fixed address), then CHSTAT.END, EN cleared, DMAINT(8+n) raised unless
++ *   CHCFG.DEM masks it. CLREND/CLREN/SWRST behave as on hardware. Completion is
++ *   delayed by DMAC_HI_UNIT_NS per unit (approximates a timer-paced request).
++ */
++#include "qemu/osdep.h"
++#include "qemu/timer.h"
++#include "qemu/module.h"
++#include "hw/core/irq.h"
++#include "hw/core/sysbus.h"
++#include "qom/object.h"
++#include "system/address-spaces.h"
++#include "system/memory.h"
++#include "rz_a1h.h"
++#include "rza1h_debug.h"
++
++#define NCH 8
++#define STRIDE 0x40
++#define N0SA 0x00
++#define N0DA 0x04
++#define N0TB 0x08
++#define CHSTAT 0x24
++#define CHCTRL 0x28
++#define CHCFG 0x2c
++#define ST_EN (1u << 0)
++#define ST_END (1u << 6)
++#define CTL_SETEN (1u << 0)
++#define CTL_CLREN (1u << 1)
++#define CTL_SWRST (1u << 3)
++#define CTL_CLREND (1u << 5)
++#define CFG_SAD (1u << 20)
++#define CFG_DAD (1u << 21)
++#define CFG_DEM (1u << 24)
++#define DMAC_HI_UNIT_NS 1000
++
++OBJECT_DECLARE_SIMPLE_TYPE(RZA1HDmacHiState, RZA1H_DMAC_HI)
++
++struct RZA1HDmacHiState {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;
++    uint8_t regs[0x400];
++    uint32_t chstat[NCH];
++    QEMUTimer *timer[NCH];
++    qemu_irq irq[NCH];
++};
++
++static uint32_t rd32(RZA1HDmacHiState *s, int off)
++{
++    uint32_t v;
++    memcpy(&v, &s->regs[off], 4);
++    return v;
++}
++
++static void update_irq(RZA1HDmacHiState *s, int ch)
++{
++    bool dem = rd32(s, ch * STRIDE + CHCFG) & CFG_DEM;
++    qemu_set_irq(s->irq[ch], (s->chstat[ch] & ST_END) && !dem);
++}
++
++static void complete(RZA1HDmacHiState *s, int ch)
++{
++    s->chstat[ch] = (s->chstat[ch] & ~ST_EN) | ST_END;
++    rza1h_debug("dmac", "dmac_hi ch%d complete", 8 + ch);
++    update_irq(s, ch);
++}
++
++static void timer_cb(void *opaque, int ch)
++{
++    complete(opaque, ch);
++}
++static void t0(void *o) { timer_cb(o, 0); }
++static void t1(void *o) { timer_cb(o, 1); }
++static void t2(void *o) { timer_cb(o, 2); }
++static void t3(void *o) { timer_cb(o, 3); }
++static void t4(void *o) { timer_cb(o, 4); }
++static void t5(void *o) { timer_cb(o, 5); }
++static void t6(void *o) { timer_cb(o, 6); }
++static void t7(void *o) { timer_cb(o, 7); }
++
++static void start(RZA1HDmacHiState *s, int ch)
++{
++    int b = ch * STRIDE;
++    uint32_t sa = rd32(s, b + N0SA), da = rd32(s, b + N0DA), n = rd32(s, b + N0TB);
++    uint32_t cfg = rd32(s, b + CHCFG);
++    static const int sz[8] = { 1, 2, 4, 8, 16, 32, 64, 128 };
++    int unit = sz[(cfg >> 16) & 7];   /* DDS */
++    uint8_t buf[128];
++
++    s->chstat[ch] |= ST_EN;
++    rza1h_debug("dmac", "dmac_hi ch%d SETEN sa=%#x da=%#x n=%u cfg=%#x", 8 + ch, sa, da, n, cfg);
++    for (uint32_t off = 0; off < n; off += unit) {
++        int u = MIN((uint32_t)unit, n - off);
++        address_space_read(&address_space_memory, sa + ((cfg & CFG_SAD) ? 0 : off),
++                           MEMTXATTRS_UNSPECIFIED, buf, u);
++        address_space_write(&address_space_memory, da + ((cfg & CFG_DAD) ? 0 : off),
++                            MEMTXATTRS_UNSPECIFIED, buf, u);
++    }
++    timer_mod(s->timer[ch], qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
++              (int64_t)(n / unit + 1) * DMAC_HI_UNIT_NS);
++}
++
++static uint64_t dh_read(void *opaque, hwaddr off, unsigned size)
++{
++    RZA1HDmacHiState *s = opaque;
++    int ch = off / STRIDE;
++    uint32_t v;
++
++    if (ch < NCH && off % STRIDE == CHSTAT) {
++        return s->chstat[ch];
++    }
++    memcpy(&v, &s->regs[off], 4);
++    return size == 4 ? v : size == 2 ? (v & 0xffff) : (v & 0xff);
++}
++
++static void dh_write(void *opaque, hwaddr off, uint64_t v, unsigned size)
++{
++    RZA1HDmacHiState *s = opaque;
++    int ch = off / STRIDE;
++
++    if (ch < NCH && off % STRIDE == CHCTRL) {
++        if (v & CTL_SWRST) {
++            s->chstat[ch] = 0;
++            timer_del(s->timer[ch]);
++        }
++        if (v & CTL_CLREN) {
++            s->chstat[ch] &= ~ST_EN;
++            timer_del(s->timer[ch]);
++        }
++        if (v & CTL_CLREND) {
++            s->chstat[ch] &= ~ST_END;
++        }
++        if (v & CTL_SETEN) {
++            start(s, ch);
++        }
++        update_irq(s, ch);
++        return;
++    }
++    memcpy(&s->regs[off], &v, size);
++    if (ch < NCH && off % STRIDE == CHCFG) {
++        update_irq(s, ch);
++    }
++}
++
++static const MemoryRegionOps dh_ops = {
++    .read = dh_read,
++    .write = dh_write,
++    .valid.min_access_size = 1,
++    .valid.max_access_size = 4,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++};
++
++static void dh_reset(DeviceState *dev)
++{
++    RZA1HDmacHiState *s = RZA1H_DMAC_HI(dev);
++    memset(s->regs, 0, sizeof(s->regs));
++    for (int ch = 0; ch < NCH; ch++) {
++        s->chstat[ch] = 0;
++        timer_del(s->timer[ch]);
++        qemu_irq_lower(s->irq[ch]);
++    }
++}
++
++static void dh_init(Object *obj)
++{
++    RZA1HDmacHiState *s = RZA1H_DMAC_HI(obj);
++    static void (*const cb[NCH])(void *) = { t0, t1, t2, t3, t4, t5, t6, t7 };
++
++    memory_region_init_io(&s->iomem, obj, &dh_ops, s, "rza1h-dmac-hi", 0x400);
++    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
++    for (int ch = 0; ch < NCH; ch++) {
++        s->timer[ch] = timer_new_ns(QEMU_CLOCK_VIRTUAL, cb[ch], s);
++        sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq[ch]);
++    }
++}
++
++static void dh_class_init(ObjectClass *oc, const void *data)
++{
++    device_class_set_legacy_reset(DEVICE_CLASS(oc), dh_reset);
++}
++
++static const TypeInfo dh_info = {
++    .name = TYPE_RZA1H_DMAC_HI,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(RZA1HDmacHiState),
++    .instance_init = dh_init,
++    .class_init = dh_class_init,
++};
++
++static void dh_register(void)
++{
++    type_register_static(&dh_info);
++}
++
++type_init(dh_register)
 diff --git a/qemu-machine/src/gpio.c b/qemu-machine/src/gpio.c
 index 908927a..750981f 100644
 --- a/qemu-machine/src/gpio.c
@@ -484,8 +693,187 @@ index 0000000..1664993
 +}
 +
 +type_init(mtu2g_register)
+diff --git a/qemu-machine/src/rspi_gen.c b/qemu-machine/src/rspi_gen.c
+new file mode 100644
+index 0000000..3570cc1
+--- /dev/null
++++ b/qemu-machine/src/rspi_gen.c
+@@ -0,0 +1,173 @@
++/*
++ * RZ/A1H RSPI (channels 0..4) -- generic register model, written for the IC-705 port.
++ *
++ * rspi2.c models RSPI2 around the IC-7300 fake FPGA. The IC-705 talks to SPI devices on
++ * RSPI0/1/3/4 (and polls RSPI0 SPSR during bring-up), so this device models the master
++ * itself: every byte written to SPDR is clocked out at once and the attached device's
++ * reply byte is queued in the RX FIFO. The default device answers 0xFF (an idle MISO
++ * line); RZA1H_RSPI<n>_MISO=0xNN overrides the idle byte per channel.
++ *
++ * Registers (offsets per RZ/A1H manual): SPCR +0 (SPRIE b7, SPE b6, SPTIE b5),
++ * SPSR +3 (SPRF b7, TEND b6, SPTEF b5), SPDR +4 (8/16/32-bit access = 1/2/4 frames),
++ * SPBFCR +0x20 (TXRST b7, RXRST b6), SPBFDR +0x22 (T count b11..8, R count b5..0).
++ * Interrupts: SPEI/SPRI/SPTI = GIC 270/271/272 + 3*ch.
++ */
++#include "qemu/osdep.h"
++#include "qemu/module.h"
++#include "hw/core/irq.h"
++#include "hw/core/sysbus.h"
++#include "qom/object.h"
++#include "hw/core/qdev-properties.h"
++#include "rz_a1h.h"
++#include "rza1h_debug.h"
++
++#define SPCR 0x00
++#define SPSR 0x03
++#define SPDR 0x04
++#define SPBFCR 0x20
++#define SPBFDR 0x22
++#define SPCR_SPRIE 0x80
++#define SPCR_SPE 0x40
++#define SPCR_SPTIE 0x20
++#define SPSR_SPRF 0x80
++#define SPSR_TEND 0x40
++#define SPSR_SPTEF 0x20
++#define RXQ 64
++
++OBJECT_DECLARE_SIMPLE_TYPE(RZA1HRspiGState, RZA1H_RSPI_GEN)
++
++struct RZA1HRspiGState {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;
++    uint32_t channel;
++    uint8_t regs[0x100];
++    uint8_t rx[RXQ];
++    int rx_n;
++    qemu_irq irq_rx, irq_tx;
++};
++
++static uint8_t dev_reply(RZA1HRspiGState *s, uint8_t tx)
++{
++    char name[24];
++    snprintf(name, sizeof(name), "RZA1H_RSPI%u_MISO", s->channel);
++    const char *e = getenv(name);
++    return e ? strtoul(e, NULL, 0) : 0xFF;
++}
++
++static void update(RZA1HRspiGState *s)
++{
++    uint8_t cr = s->regs[SPCR];
++    qemu_set_irq(s->irq_rx, (cr & SPCR_SPRIE) && s->rx_n > 0);
++    qemu_set_irq(s->irq_tx, (cr & SPCR_SPTIE) && (cr & SPCR_SPE));
++}
++
++static uint64_t rg_read(void *opaque, hwaddr off, unsigned size)
++{
++    RZA1HRspiGState *s = opaque;
++    uint64_t v = 0;
++
++    switch (off) {
++    case SPSR:
++        return (s->rx_n ? SPSR_SPRF : 0) | SPSR_TEND | SPSR_SPTEF | (s->regs[SPSR] & 0x1f);
++    case SPDR: {
++        int n = size;               /* frames of 8 bits, LSB first */
++        for (int i = 0; i < n; i++) {
++            uint8_t b = 0xFF;
++            if (s->rx_n) {
++                b = s->rx[0];
++                memmove(s->rx, s->rx + 1, --s->rx_n);
++            }
++            v |= (uint64_t)b << (8 * (n - 1 - i));
++        }
++        update(s);
++        return v;
++    }
++    case SPBFDR:
++        return MIN(s->rx_n, 32);
++    default:
++        memcpy(&v, &s->regs[off], size);
++        return v;
++    }
++}
++
++static void rg_write(void *opaque, hwaddr off, uint64_t v, unsigned size)
++{
++    RZA1HRspiGState *s = opaque;
++
++    switch (off) {
++    case SPDR:
++        for (int i = size - 1; i >= 0; i--) {
++            uint8_t tx = v >> (8 * i);
++            uint8_t rb = dev_reply(s, tx);
++            if (s->rx_n < RXQ) {
++                s->rx[s->rx_n++] = rb;
++            }
++            rza1h_debug("rspi", "rspi%u tx %02x rx %02x", s->channel, tx, rb);
++        }
++        break;
++    case SPBFCR:
++        if (v & 0x40) {
++            s->rx_n = 0;
++        }
++        s->regs[off] = v & 0x3f;
++        break;
++    case SPSR:
++        s->regs[off] &= v;      /* error flags clear by writing 0 */
++        break;
++    default:
++        memcpy(&s->regs[off], &v, size);
++        break;
++    }
++    update(s);
++}
++
++static const MemoryRegionOps rg_ops = {
++    .read = rg_read,
++    .write = rg_write,
++    .valid.min_access_size = 1,
++    .valid.max_access_size = 4,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++};
++
++static void rg_reset(DeviceState *dev)
++{
++    RZA1HRspiGState *s = RZA1H_RSPI_GEN(dev);
++    memset(s->regs, 0, sizeof(s->regs));
++    s->rx_n = 0;
++    update(s);
++}
++
++static void rg_init(Object *obj)
++{
++    RZA1HRspiGState *s = RZA1H_RSPI_GEN(obj);
++    memory_region_init_io(&s->iomem, obj, &rg_ops, s, "rza1h-rspi-gen", 0x100);
++    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
++    sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq_rx);
++    sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq_tx);
++}
++
++static const Property rg_props[] = {
++    DEFINE_PROP_UINT32("channel", RZA1HRspiGState, channel, 0),
++};
++
++static void rg_class_init(ObjectClass *oc, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(oc);
++    device_class_set_legacy_reset(dc, rg_reset);
++    device_class_set_props(dc, rg_props);
++}
++
++static const TypeInfo rg_info = {
++    .name = TYPE_RZA1H_RSPI_GEN,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(RZA1HRspiGState),
++    .instance_init = rg_init,
++    .class_init = rg_class_init,
++};
++
++static void rg_register(void)
++{
++    type_register_static(&rg_info);
++}
++
++type_init(rg_register)
 diff --git a/qemu-machine/src/rz_a1h.c b/qemu-machine/src/rz_a1h.c
-index 2342e9e..ab1e41b 100644
+index 2342e9e..e312c2c 100644
 --- a/qemu-machine/src/rz_a1h.c
 +++ b/qemu-machine/src/rz_a1h.c
 @@ -45,6 +45,7 @@
@@ -496,7 +884,22 @@ index 2342e9e..ab1e41b 100644
  
  /* Every I/O region notes/memory-map.md documents, mirroring
   * emu/board.py's IO_REGIONS list exactly (same names, same comments on
-@@ -331,6 +332,22 @@ static void rza1h_init(MachineState *machine)
+@@ -102,6 +103,14 @@ static void rza1h_cpu_reset(void *opaque)
+     CPUState *cs = CPU(cpu);
+ 
+     cpu_reset(cs);
++    /* IC-705 port: deep-standby wake-up factor (DSFR, 0xFCFF1808). The IC-705 main CPU
++     * is normally woken from deep standby; its power-state code reads DSFR bits 13/10/4/3
++     * (0x2007BB10). RZA1H_DSFR sets the value seen after reset (default 0). */
++    if (rza1h_board_ic705()) {
++        const char *e = getenv("RZA1H_DSFR");
++        uint16_t v = e ? strtoul(e, NULL, 0) : 0;
++        address_space_write(&address_space_memory, 0xFCFF1808, MEMTXATTRS_UNSPECIFIED, &v, 2);
++    }
+     /* Real hardware's boot-mode-3 SPI-flash XIP entry point -- confirmed
+      * ground truth, see notes/base-loader.md and RZA1H_FLASH_BASE's own
+      * comment in rz_a1h.h. */
+@@ -331,6 +340,22 @@ static void rza1h_init(MachineState *machine)
       * ring has drained, so its "ring now empty" flag-clear (main_idle_
       * loop's own entry-wait gate, 0x203906ed) never runs even once the
       * ring genuinely is empty. See mtu2.c's own comment. */
@@ -519,7 +922,7 @@ index 2342e9e..ab1e41b 100644
      mtu2 = qdev_new(TYPE_RZA1H_MTU2);
      sysbus_realize_and_unref(SYS_BUS_DEVICE(mtu2), &error_fatal);
      sysbus_mmio_map_overlap(SYS_BUS_DEVICE(mtu2), 0, RZA1H_MTU2_BASE, 0);
-@@ -352,6 +369,7 @@ static void rza1h_init(MachineState *machine)
+@@ -352,6 +377,7 @@ static void rza1h_init(MachineState *machine)
      sysbus_connect_irq(SYS_BUS_DEVICE(mtu2), 5,
                         qdev_get_gpio_in(gic,
                             RZA1H_MTU2_TGI1A_IRQ - RZA1H_GIC_NUM_INTERNAL));
@@ -527,7 +930,7 @@ index 2342e9e..ab1e41b 100644
  
      /* riic.c -- upgraded from a bare RAM region to a real device,
       * 2026-09-08 second pass, once body.bin's own cold-boot RIIC2 read
-@@ -407,7 +425,7 @@ static void rza1h_init(MachineState *machine)
+@@ -407,7 +433,7 @@ static void rza1h_init(MachineState *machine)
           * channel leaves it created but unmapped, a normal, inert QEMU
           * idiom (rza1h_scif_init's own comment explains why it can't be
           * skipped at creation time instead). */
@@ -536,7 +939,53 @@ index 2342e9e..ab1e41b 100644
              sysbus_mmio_map_overlap(SYS_BUS_DEVICE(scif), 1,
                                      RZA1H_SCIF5_DSP_RETRY_ARM_BASE, 0);
          }
-@@ -519,7 +537,7 @@ static void rza1h_init(MachineState *machine)
+@@ -437,6 +463,17 @@ static void rza1h_init(MachineState *machine)
+                                                  RZA1H_GIC_NUM_INTERNAL));
+     }
+ 
++    if (rza1h_board_ic705()) {
++        DeviceState *dh = qdev_new(TYPE_RZA1H_DMAC_HI);
++        sysbus_realize_and_unref(SYS_BUS_DEVICE(dh), &error_fatal);
++        sysbus_mmio_map_overlap(SYS_BUS_DEVICE(dh), 0, RZA1H_DMAC_BASE + 0x400, 0);
++        for (int dch = 0; dch < 8; dch++) {
++            sysbus_connect_irq(SYS_BUS_DEVICE(dh), dch,
++                               qdev_get_gpio_in(gic, RZA1H_DMAC_CH0_IRQ + 8 + dch -
++                                                     RZA1H_GIC_NUM_INTERNAL));
++        }
++    }
++
+     /* sdhi.c -- the SD slot body.bin actually drives (not MMCIF, see sdhi.c).
+      * The card is upstream's sd-card, backed by `-drive if=sd`; without one
+      * the slot is empty. Overlap-mapped inside "io-e8030000". */
+@@ -468,6 +505,19 @@ static void rza1h_init(MachineState *machine)
+      * comment). Overlap-mapped: sits inside the broader "io-e8000000"
+      * unimplemented-device catch-all above. SPRI2 wired 2026-09-24 for the
+      * fake FPGA's sweep reads, see rspi2.c's own comment. */
++    if (rza1h_board_ic705()) {
++        for (int rc = 0; rc < 5; rc++) {
++            DeviceState *r = qdev_new(TYPE_RZA1H_RSPI_GEN);
++            qdev_prop_set_uint32(r, "channel", rc);
++            sysbus_realize_and_unref(SYS_BUS_DEVICE(r), &error_fatal);
++            sysbus_mmio_map_overlap(SYS_BUS_DEVICE(r), 0, 0xE800C800 + rc * 0x800, 0);
++            sysbus_connect_irq(SYS_BUS_DEVICE(r), 0,
++                               qdev_get_gpio_in(gic, 271 + 3 * rc - RZA1H_GIC_NUM_INTERNAL));
++            sysbus_connect_irq(SYS_BUS_DEVICE(r), 1,
++                               qdev_get_gpio_in(gic, 272 + 3 * rc - RZA1H_GIC_NUM_INTERNAL));
++        }
++        goto rspi_done;
++    }
+     rspi2 = qdev_new(TYPE_RZA1H_RSPI2);
+     sysbus_realize_and_unref(SYS_BUS_DEVICE(rspi2), &error_fatal);
+     sysbus_mmio_map_overlap(SYS_BUS_DEVICE(rspi2), 0, RZA1H_RSPI2_BASE, 0);
+@@ -475,6 +525,7 @@ static void rza1h_init(MachineState *machine)
+                        qdev_get_gpio_in(gic, RZA1H_RSPI2_SPRI_IRQ -
+                                              RZA1H_GIC_NUM_INTERNAL));
+ 
++rspi_done:
+     /* ssif.c -- SSIF0/1, the CPU end of the DSP audio link (2026-09-24, see ssif.c).
+      * Overlap-mapped inside "io-e8200000"; no IRQs (the firmware polls DMAC CHSTAT). */
+     {
+@@ -519,7 +570,7 @@ static void rza1h_init(MachineState *machine)
  
  static void rza1h_machine_init(MachineClass *mc)
  {
@@ -546,14 +995,16 @@ index 2342e9e..ab1e41b 100644
      mc->default_cpu_type = ARM_CPU_TYPE_NAME("cortex-a9");
      mc->max_cpus = 1;
 diff --git a/qemu-machine/src/rz_a1h.h b/qemu-machine/src/rz_a1h.h
-index 9aac7c4..cba3ff6 100644
+index 9aac7c4..1956e63 100644
 --- a/qemu-machine/src/rz_a1h.h
 +++ b/qemu-machine/src/rz_a1h.h
-@@ -134,6 +134,8 @@
+@@ -134,6 +134,10 @@
  #define RZA1H_MTU2_TGI4D_IRQ 162 /* added 2026-09-21, see mtu2.c's own comment --
                                    * rspi2_wait_ready's own completion callback */
  #define TYPE_RZA1H_MTU2 "rza1h-mtu2"
-+#define TYPE_RZA1H_MTU2G "rza1h-mtu2g"  /* general model, IC-705 port */
++#define TYPE_RZA1H_MTU2G "rza1h-mtu2g"
++#define TYPE_RZA1H_DMAC_HI "rza1h-dmac-hi"  /* DMAC ch8..15, IC-705 port */
++#define TYPE_RZA1H_RSPI_GEN "rza1h-rspi-gen"  /* generic RSPI0..4, IC-705 port */  /* general model, IC-705 port */
 +int rza1h_mtu2g_irq_id(int c, int i);
  
  /* riic.c -- matches emu/peripherals/riic.py's per-instance base addresses
