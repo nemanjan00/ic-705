@@ -48,8 +48,41 @@ isr I2S0 TX        0x17487   ring → I2S0 right channel
 - Strings `DIRECT  DIRECT` (simplex RPT1/RPT2 defaults) and `0x55` sync patterns.
 - Two more windowed-sinc lowpass tables nearby (file `+0x19752`, period ≈ 8).
 
+## I2S0 stream roles [FW unless tagged]
+
+| Direction | Channel | Ring (byte addr) | Consumer / producer | Meaning |
+|---|---|---|---|---|
+| RX | L | `0xA2C` ×1024 | `0x15C9D`, per sample, phase counter `word_41B2` cycling 0–9 | **FM discriminator, 48 kHz, 10 samples/symbol** → GMSK demod |
+| RX | R | `0x222C` ×1024 | `0x158AA`, blocks of 6 → `0x14B7A` | 48 → 8 kHz audio → vocoder encoder (mic) [INF] |
+| TX | R | `0x22C` ×1024 | GMSK modulator | FM modulation samples |
+| TX | L | ring of `0xBA4` entries | — | decoded voice to speaker [INF] |
+
+The I2S0 peer therefore supplies a raw discriminator and takes raw modulation — most
+likely the main DSP [INF].
+
+## Vocoder [FW]
+
+D-STAR AMBE 3600x2400 codebooks (PRBA24/PRBA58/HOCb5–8, Q11) sit in this image at
+`dsp.image.bin+0x1A256…0x1B456`. No AMBE+2 codebooks. See `DMR_FEASIBILITY.md` R1.
+
+## Host link
+
+- The DV DSP's `0x35xx` I/O block is byte-oriented: init (`0x18525`) writes `0x3510=0x17`,
+  `0x352C=0x3C3` (divisor-like), ISR `0x181F9` reads a byte from `0x353C` and writes
+  `0x3538`. [FW] Exact peripheral not identified.
+- ARM side candidate: **SCIF5** (`0xE8009800`), set up in clock-synchronous mode
+  (SMR bit 7) with six DMA channels parked; the module is tied to the
+  "SX-4075 DV Check" service strings. [FW] link identity [INF]
+- TX voice frames enter a 64-entry queue of 7-word records (byte `0x5672`, write idx
+  `word_59F2`) via `0x12819`; the DSP drives GPIO `0x1C0B` bit 1 high when fewer than
+  10 records remain (flow-control request) and low when one arrives. [FW]
+- `0x7969` dispatches on a 16-bit value from the host-comms struct at byte `0x65FC`
+  (+0xF2/+0xF3); values seen: `0x0272 0x0300 0x0305 0x0414-0x0416 0x0440 0x04C1
+  0x0701 0x0801 0x0812 0x0907 0x0C31 0x1070 0x1077 0x1230 0x2903 0x2974 0x2976 0xA517`.
+  Meaning unknown — they barely appear as ARM constants, so they may be fields of
+  framed data rather than host opcodes. [FW values, INF meaning]
+
 ## Open
 
-- Where the vocoder lives (here, or in the `0x40000` blob) — see `DMR_FEASIBILITY.md`.
-- What the I2S0 RX streams are (discriminator vs audio), and who the I2S0 peer is.
-- The `0x35xx` I/O block.
+- Exact host protocol (frame format over the serial link).
+- I2S0 peer identity; the `0x35xx` peripheral.
