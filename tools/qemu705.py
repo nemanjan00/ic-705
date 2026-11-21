@@ -98,4 +98,6 @@ def main():
     print('stderr tail:', open(f'{SCR}/qemu705_stderr.log').read()[-600:])
 
 if __name__ == '__main__':
+    import atexit, signal
+    atexit.register(lambda: subprocess.run(['pkill', '-f', 'qmp705.sock'], stderr=subprocess.DEVNULL))
     main()
