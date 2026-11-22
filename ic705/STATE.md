@@ -9,7 +9,7 @@ Tags: [FW] firmware static · [HW] radio · [VM] emulator · [EXT] outside · [I
   firmware in the same QEMU machine (`EMULATION.md` "Full-system status (2026-11-22)").
   Adjust-mode trap understood (ARM ADC ch6 window 721..802). Remaining boot popup:
   DSP/FPGA version mismatch, because the main DSP and DV DSP are not emulated.
-  **Next:** main DSP core is likely an ADI SHARC (see EMULATION.md); confirm and its host link (RSPI0 command
+  **Next:** main DSP core unidentified (SHARC disproved by opcode check); confirm and its host link (RSPI0 command
   queue `0x20201F4C`, ready P3_8), then decide between a full C55x core in QEMU or a
   firmware-accurate version responder; FPGA stays a dummy (owner's choice).
 - **2026-11-22 (later): owner chose input/peripherals before DSPs.** Keys work end to end
@@ -53,7 +53,7 @@ None — no radio access so far; static analysis of `705E140.dat` (MD5 `2c9c1d7f
 
 ## Open questions
 
-- Main DSP chip/format (`0x40000`, `0x80000` blobs; the latter is neither LZSS nor autokey). **Not C55x:** region 0 "DSP-A" is the DV DSP's own loader [FW]; the main DSP is booted by the ARM streaming flash 0x40008.. over RSPI4 (`0x2011D3E0`), and the stream looks like an ADI SHARC boot stream [INF, strong].
+- Main DSP chip/format (`0x40000`, `0x80000` blobs; the latter is neither LZSS nor autokey). **Not C55x:** region 0 "DSP-A" is the DV DSP's own loader [FW]; the main DSP is booted by the ARM streaming flash 0x40008.. over RSPI4 (`0x2011D3E0`), the stream's ISA is **unknown** (SHARC and DSP563xx signature checks negative) [INF].
 - Is SCIF5 the DV DSP host link; its frame format.
 - I2S0 peer (main DSP vs FPGA); per-mode gain after the DV DSP.
 

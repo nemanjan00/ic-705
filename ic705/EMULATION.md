@@ -249,11 +249,11 @@ UI language is Japanese (factory default: the settings EEPROM is blank).
     high (DSP up) [FW]. In the VM the stream stops after 4 bytes because `rspi_gen.c` has
     no TX-empty interrupt yet [VM].
   - Region-1 stream layout: 0x600 bytes = 256 × 48-bit instructions (zero padded at the
-    end; all-zero words at the start = NOP), then three-word block headers. This is the
-    shape of an **Analog Devices SHARC** SPI-slave boot stream (boot kernel + tagged
-    blocks); 12-byte periodicity = two 48-bit instructions per three 32-bit words [INF,
-    strong]. No SHARC CPU model exists in QEMU/IDA here, so running it needs a new SHARC
-    core (large job).
+    end; all-zero words at the start = NOP), then three-word block headers. First read as an ADI SHARC boot stream, but **checked and not confirmed**: no SHARC
+    signature opcodes (RTS 0x0A3E00000000, absolute JUMP/CALL 0x063E…) under any byte order
+    or alignment of the 0x600-byte kernel; DSP563xx (IDA `dsp56k`) decoding of the same bytes
+    is also implausible. Core **unknown** [INF]; a chip marking or a statistical ISA classifier
+    (cpu_rec) would settle it.
 - **Input:** touch/keys path not identified yet (not on I2C: RIIC0=EEPROM 0x53,
   RIIC1=0x6B/0x35; most likely via the sub-CPU status frame).
 - No audio, no RF; Wi-Fi/BT/GPS absent.
