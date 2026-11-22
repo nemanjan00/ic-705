@@ -4,6 +4,10 @@ Tags: [FW] firmware static · [HW] radio · [VM] emulator · [EXT] outside · [I
 
 ## Now
 
+- **2026-11-22: DV DSP firmware runs in `tools/c55sim.py`** (whole-firmware C55x core) to its
+  main loop. Next: find which ARM SSIF faces the DV DSP, model SSIF+I2S on both sides and
+  co-simulate (QEMU <-> c55sim). Main DSP still unidentified (needs part number or cpu_rec).
+
 - **2026-11-22: real power-on + real sub-CPU [VM].** POWER press → deep-standby cancel →
   full bring-up → main screen, no boot hook; the STM32L0 sub-CPU runs its own decoded
   firmware in the same QEMU machine (`EMULATION.md` "Full-system status (2026-11-22)").

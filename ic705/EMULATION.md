@@ -10,7 +10,7 @@ what the radio does.
 | ARM function-level (call one firmware function, log MMIO) | **working** | `tools/arm_emu.py` (Unicorn 2.1.4) |
 | ARM updater (DSP flash writer) | **working** | `tools/arm_dsp_update_emu.py`: firmware code with HLE for SD read + SPI-NOR model |
 | ARM full-system (boot RTX, UI, screen) | **boots to the IC-705 UI** (QEMU, IC-705 port of the IC-7300 machine) | `qemu/`, `tools/qemu705.py`, `tools/run705_gui.py`; see "Full-system status" |
-| DV DSP (C55x) | **working for the modulator** | `tools/c55_emu.py`: interprets the IDA-decoded instruction stream; DSPLIB `fir` is emulated at high level |
+| DV DSP (C55x) | **whole firmware boots to its main loop** in a new core; not yet linked to QEMU | `tools/c55sim.py` (whole-firmware simulator); `tools/c55_emu.py` (single routines, modulator PoC) |
 | Sub-CPU (STM32L0, aux2 firmware) | **runs its own firmware** inside the QEMU machine (second CPU cluster) | `qemu/ic705-port.patch` (`stm32l0.c`) |
 | Main DSP, FPGA | out of reach for now | main DSP likely C55x (see below); FPGA stays a dummy by design |
 
@@ -267,3 +267,31 @@ python3 tools/run705_gui.py                 # GTK window + terminal controls (ke
 python3 tools/qemu705.py --force-on --secs 60 --shot out.png   # headless + screenshot
 echo 0=ff > <scratch>/substat.txt           # poke sub-CPU status byte 0 live
 ```
+
+## DV DSP simulator (`tools/c55sim.py`) [VM]
+
+A whole-firmware TMS320C55x simulator. Decoding comes from IDA (TMS32055): an export of
+every code head with mnemonic, operand text and IDA's numeric operand fields
+(`~/icom/out/705E140_full/dspB_insns.json`, gitignored; regenerate with the IDA script in
+the commit message / STATE). The simulator implements the semantics: 40-bit accumulators
+with SXMD/M40/SATD/FRCT/SMUL, MMR-mapped registers, direct / indirect / circular / stack /
+MMR / I/O addressing, `Tn=Smem` loads, dual MAC/MAS::MOV forms, repeat single and block
+repeat, conditional execution (`xcc`/`xccpart`), parallel pairs, dual-stack call/return,
+and interrupts (IFR write-1-to-clear, IVPD vectors). Unknown forms raise instead of
+guessing.
+
+Status: from the DSP-B entry (byte 0xA9AC) the firmware sets the clocks/PLL (0x1C00 block),
+SAR ADC (0x7012..0x701A), the unidentified 0x3510..0x353C block, and I2S0 (0x2800: 0x20,
+0x1C, 0x28, enable), enables IER0 = 0x0AA0 and runs its main loop, polling its I2S receive
+rings and housekeeping. Five million instructions run with no unimplemented form.
+
+Findings on the way:
+- IDA reports some dual MAC/MAS::MOV forms one byte short (the trailing byte stays
+  undecoded); the simulator absorbs that byte.
+- Computed switch tables (`mov dbl(*AR3), AC0; b AC0`, e.g. table at word 0x1FC24) point at
+  code IDA never disassembled; those entries were turned into code in the IDA database and
+  the export regenerated.
+- ARM side: the DV DSP has no UART/SPI, only I2S0/I2S2. ARM SCIF5 stays silent during
+  boot. The ARM's serial-audio ports in use are SSIF0, SSIF3 and SSIF5, all DMA-driven
+  with 288-byte buffers (`0x200FEF94`; DMA request sources 225/226, 238, 246). Which of
+  them faces the DV DSP is the next question.
