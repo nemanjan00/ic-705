@@ -10,7 +10,8 @@ Tags: [FW] firmware static · [HW] radio · [VM] emulator · [EXT] outside · [I
   (bit-reversed bytes, LE32, 2×48-bit per 3 words). `tools/sharc_dis.py` decodes kernel + VISA program; `tools/sharc_sim.py` runs the real
   firmware through its whole init (~500k instructions incl. heap, malloc, I2C codec set-up
   at 0x18 via a TWI model) into its main loop; with the SPORT chained-DMA model the SPORT4 (P8I) audio interrupt
-  runs its filter chain every block [VM].
+  runs its filter chain every block [VM]. The ARM link protocol on SPIB is decoded:
+  half-duplex, 4-byte big-endian commands in, changed-status frames out (EMULATION.md).
   Next: SPIB slave-DMA + interrupt (ARM link on RSPI0), SPORT to DV DSP/codecs, then the
   QEMU <-> sim bridge.
 

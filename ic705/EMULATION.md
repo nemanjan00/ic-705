@@ -426,5 +426,32 @@ Interrupts and the audio heartbeat [FW/VM]:
 - With `Sports` (one block every N instructions) the P8I handler runs repeatedly
   (biquad cascades at 0x128842); between blocks the main loop wakes from IDLE, runs its
   services and idles again. Speed is about 200k instructions/s in CPython.
-Next: SPIB slave-DMA + interrupt model, and a QEMU <-> Python co-simulation bridge (RSPI0
-bytes and the P3_8 / P7_6 / P7_7 handshake lines over a socket).
+- Per block the firmware also starts the **FIR accelerator** (FIRCTL1 0x5000 = 0x101,
+  chain pointer CPFIR 0x501C). It is not modelled, so filter outputs are zeros; that only
+  affects audio content, not control flow [VM].
+
+ARM <-> main-DSP link (SPIB slave on the DSP, RSPI0 master with DMA on the ARM) [FW]:
+- **Half-duplex, switched by the DSP.** Flag DM(0xB2AF5) selects the mode; a main-loop
+  service (0x126F28) applies changes:
+  - RX mode (flag 0): SPIB receive DMA, 40-word ring at 0xB2C3E (chain TCB 0x386E5,
+    SPICTL 0x84206 = slave, DMA, enabled), FLAGS bit 4 (FLAG2) cleared. The poll at 0x126EAA
+    reads CSPIB (0x2882): words received = 0x28 - CSPIB. Each SPI byte lands in its own
+    DMA word, and **four bytes make one command**, big-endian (`b0<<24 | b1<<16 | b2<<8 |
+    b3`). New commands (index after DM(0xB2C99), at most 10 per ring) go to 0x126E20, which
+    dispatches on the top byte: 0x44 -> 0x126E97 (a tuning-style value: bits 8..16 and
+    16..32 are scaled by 10 and 1/1024 into floats), 0x45 -> sets DM(0xB86D1), bit 31 set
+    -> queue at 0xB2BFA (0x12A984), anything else -> 0x125B1E.
+  - TX mode (flag != 0): 0x125C85 builds a frame in 0xB2C66 (40 words) containing only the
+    status values that changed since the last frame (it compares pairs such as
+    0xB2C2B/0xB2AE1 and 0xB2C33/0xB2AE9). It then sets up a SPIB transmit DMA (chain TCB
+    0x386E9, SPICTL 0x40202 -> enabled) and sets FLAG2. 0x125C5B waits until the ARM has
+    clocked out 4 x n + 9 words and SPISTAT.SPIF = 1, then clears the flag, which switches
+    back to RX.
+- ARM side: RSPI0 (0xE800C800) runs full-duplex DMA. Incoming DSP data is parsed by
+  0x201FFF08 as frames: length byte 1..0x2D, payload, 0xFF at the end, with 0xFF filling the
+  idle time. 0x20202128 then moves the decoded status into radio state (this is where the
+  DV DSP version arrives).
+Next: a QEMU <-> Python co-simulation bridge. RSPI0 bytes in both directions go to SPIB:
+ARM TX bytes are written into the DSP's RX ring with CSPIB updated, and the DSP's TX DMA
+words are returned as the ARM's RX bytes. FLAG2 and the P3_8 / P7_6 / P7_7 handshake lines
+go over the same socket.
