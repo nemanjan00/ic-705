@@ -238,7 +238,7 @@ UI language is Japanese (factory default: the settings EEPROM is blank).
 | MTU2 | general model (all channels, compare/clear/overflow, IRQs) | TGI4A starts ADC `0x20005C48`; TGRC_4 at +0x228 |
 | ADC | single-conversion ADF, per-channel values | `0x201185AC`; supply class `0x2000B770` (≥0x28B = DC) |
 | DMAC ch8–15 | generic block transfers + DMAINT | ch10 GPIO bit-bang `0x2011EBBC`; ch15 SCIF3 TX |
-| RSPI0–4 | generic SPI master; RSPI4 backed by SPI-NOR (DSP group image) | DSP flash `0x2006A218`; RSPI3 register writes (RF/codec chip) |
+| RSPI0–4 | generic SPI master; RSPI4 backed by SPI-NOR (DSP group image); RSPI3 = main-DSP link (socket to `dsp_bridge.py`) | DSP flash `0x2006A218`; DSP link state machine `0x20118E68` |
 | GPIO | P3_9 POWER (active low), P7_9 sub-CPU handshake, live `pins` QOM property | `0x2011D6EC`, `0x20120960` |
 | Deep standby | DSFR reset value; STBCR1 bits 7:6 + WFI = deep standby; POWER press cancels it (A9 reset, DSFR factor bit) | `0x2007BB10`, `0x20078278`, loader `0x20004840` |
 | (from the IC-7300 machine, unchanged) | GIC, OSTM, WDT, RIIC0-2 (+EEPROM, RTC), SCIF, SDHI, VDC5 compositor, OpenVG, L2C | — |
@@ -321,8 +321,9 @@ Findings on the way:
   with 288-byte buffers (`0x200FEF94`; DMA request sources 225/226, 238, 246). Which of
   them faces the DV DSP is the next question.
 - **The DV DSP is behind the main DSP [FW]:** the ARM stores the DV DSP version (block
-  `0x203E1B67`, shown as "DV DSP" in adjust mode) from its RSPI0 main-DSP message handler
-  (`0x20202128`). With no SPI/UART on the DV DSP side, its only links are I2S0/I2S2, so the
+  `0x203E1B67`, shown as "DV DSP" in adjust mode) from its status handler
+  (`0x20202128`; correction: that handler consumes RSPI0 packets, not the main-DSP link, so
+  how the DV version reaches the ARM is open again). With no SPI/UART on the DV DSP side, its only links are I2S0/I2S2, so the
   ARM reaches it through the main DSP, which relays versions (and presumably commands and
   voice frames). Linking the DV DSP into the radio therefore needs the main DSP running
   too [INF, strong].
@@ -397,7 +398,7 @@ type 15b G-bit decode bug, not the firmware waiting.) Peripherals it uses during
 - SPI (IOP 0x1000, SPICTL 0x5205): **master**, 8-bit, transfer started by a TXSPI write —
   the DSP drives a local peripheral (one transfer during start-up).
 - SPIB (IOP 0x2800, SPICTL 0x4206): **slave, DMA mode**, DMA set up at 0x2880..0x2884 — the
-  link the ARM drives on RSPI0.
+  link the ARM drives on RSPI3.
 - TWI (IOP 0x4400): **I2C master to 7-bit address 0x18**, interrupt-driven (TWIIMASK 0x50 =
   master-complete + TX service; DPI_IMASK_RE bit 6; core P14I). Init sends 41 two-byte
   register writes (reg, value), e.g. 07=0A, 09=20, 0E=80, 25=E0, 26=10, 3A=2F, 47=80,
@@ -430,28 +431,61 @@ Interrupts and the audio heartbeat [FW/VM]:
   chain pointer CPFIR 0x501C). It is not modelled, so filter outputs are zeros; that only
   affects audio content, not control flow [VM].
 
-ARM <-> main-DSP link (SPIB slave on the DSP, RSPI0 master with DMA on the ARM) [FW]:
-- **Half-duplex, switched by the DSP.** Flag DM(0xB2AF5) selects the mode; a main-loop
-  service (0x126F28) applies changes:
-  - RX mode (flag 0): SPIB receive DMA, 40-word ring at 0xB2C3E (chain TCB 0x386E5,
-    SPICTL 0x84206 = slave, DMA, enabled), FLAGS bit 4 (FLAG2) cleared. The poll at 0x126EAA
-    reads CSPIB (0x2882): words received = 0x28 - CSPIB. Each SPI byte lands in its own
-    DMA word, and **four bytes make one command**, big-endian (`b0<<24 | b1<<16 | b2<<8 |
-    b3`). New commands (index after DM(0xB2C99), at most 10 per ring) go to 0x126E20, which
-    dispatches on the top byte: 0x44 -> 0x126E97 (a tuning-style value: bits 8..16 and
-    16..32 are scaled by 10 and 1/1024 into floats), 0x45 -> sets DM(0xB86D1), bit 31 set
-    -> queue at 0xB2BFA (0x12A984), anything else -> 0x125B1E.
-  - TX mode (flag != 0): 0x125C85 builds a frame in 0xB2C66 (40 words) containing only the
-    status values that changed since the last frame (it compares pairs such as
-    0xB2C2B/0xB2AE1 and 0xB2C33/0xB2AE9). It then sets up a SPIB transmit DMA (chain TCB
-    0x386E9, SPICTL 0x40202 -> enabled) and sets FLAG2. 0x125C5B waits until the ARM has
-    clocked out 4 x n + 9 words and SPISTAT.SPIF = 1, then clears the flag, which switches
-    back to RX.
-- ARM side: RSPI0 (0xE800C800) runs full-duplex DMA. Incoming DSP data is parsed by
-  0x201FFF08 as frames: length byte 1..0x2D, payload, 0xFF at the end, with 0xFF filling the
-  idle time. 0x20202128 then moves the decoded status into radio state (this is where the
-  DV DSP version arrives).
-Next: a QEMU <-> Python co-simulation bridge. RSPI0 bytes in both directions go to SPIB:
-ARM TX bytes are written into the DSP's RX ring with CSPIB updated, and the DSP's TX DMA
-words are returned as the ARM's RX bytes. FLAG2 and the P3_8 / P7_6 / P7_7 handshake lines
-go over the same socket.
+ARM <-> main-DSP link: **RSPI3** on the ARM (master, PIO), SPIB slave on the DSP [FW]
+(correction: an earlier note said RSPI0. RSPI0 carries length-framed packets
+`[L][type][L-2 bytes][FF]`, apparently to the wireless/BT unit; it is not the SHARC.)
+- Words are 4 bytes, big-endian, one chip-select frame each (ARM 0x20118E00 writes SPCR then
+  four SPDR bytes; RX trigger level 4, SPBFCR = 0x32). Handshake: DSP FLAG2 -> ARM **P7_6**
+  (PPR7 bit 6), high while the DSP has a status frame queued.
+- ARM state machine (0x20118E68, timed by MTU2 TGI4D, GIC 162; receive ISR 0x2011913C on
+  SPRI3, GIC 280): send a queued command word unless P7_6 is high; send `80000000` (status
+  request); after the timer, if P7_6 is high, clock `FFFFFFFF` words and hand each received
+  word to 0x20118FA4, which files it by its top nibble (1 = state, 8 = status bits, 0xF =
+  version reply into 0x20498770 + 0x3C with flag +65).
+- DSP side, **half-duplex, switched by the DSP**: flag DM(0xB2AF5) selects the mode; a
+  main-loop service (0x126F28) applies changes.
+  - RX mode (flag 0): SPIB receive DMA, 40-word ring at 0xB2C3E (chain TCB 0x386E5, SPICTL
+    0x84206 = slave, DMA, enabled), FLAG2 cleared. 0x126EAA reads CSPIB (0x2882): words
+    received = 0x28 - CSPIB; each SPI byte lands in its own DMA word; four make a command.
+    0x126E20 dispatches on the top byte: 0x44 -> 0x126E97 (tuning value), 0x45 -> sets
+    DM(0xB86D1), **0x80 -> 0x125B1E (set TX mode = status request)**, anything else -> a
+    queue at 0xB2BFA, emptied by 0x125E17 through a handler table at 0xB2AFA indexed by the
+    top byte (e.g. 0x02 -> 0x126415, 0xE0 -> 0x1259FD; most entries are 0x125C3B = ignore).
+  - TX mode: 0x125C85 builds a frame in 0xB2C66 (40 words) with the status values that
+    changed since the last frame, padded with `10000000`, starts a transmit DMA (chain TCB
+    0x386E9, SPICTL 0x40202) and sets FLAG2. 0x125C5B waits until 4 x n + 9 words are out
+    and SPIF = 1, then switches back to RX.
+- **Version handshake** (this is what the boot popup checks):
+  - `020000A0` (bits 5..4 = 2, one-shot flag 0xB2CB1) makes the DSP read three 8-character
+    ASCII tags from its SPI flash through its own **SPI master** (IOP 0x1000, READ 03 +
+    24-bit address, MSB first, chip select FLAG8 = FLAGS bit 16, low = selected): flash
+    0x40000 -> 0xB2C90 ("30601120"), 0x180000 -> 0xB2D18 ("30001010"), 0x80000 -> 0xB2D20
+    ("30001000"). A tag containing 0x00 or 0xFF is cleared (0x127326). The flash is the same
+    SPI-NOR the ARM reads on RSPI4.
+  - `E000000k`: bit 0 picks the half of the tag, bits 2..1 the table; the reply word is
+    `F` + digit nibble + three ASCII characters, e.g. `F0313132`, which the ARM (0x2011955C)
+    formats as "1.12" + "00".
+- The ARM reads these in 0x201195B0: queue `E000000k`, then up to 18 status polls waiting
+  for a class-F reply.
+
+QEMU <-> simulator bridge (`tools/dsp_bridge.py`; `rspi_gen.c` RZA1H_RSPI3_SOCK /
+RZA1H_RSPI3_SOCK_PIN=7_6) [VM]:
+- Each byte the ARM clocks goes over a Unix socket as (flags, byte); flag bit 0 marks the
+  first byte after an SPCR write (a new chip-select frame). The reply is (byte, line state):
+  FLAG2 is applied to P7_6 at that moment.
+- The simulator pauses while a word is in flight, so SPIB never changes direction inside a
+  word.
+- **Time sync.** The CPython SHARC is about 1000x slower than the real DSP. The bridge holds
+  back the reply to the last byte of a word, which freezes the ARM's virtual clock, until
+  the DSP main loop has run: 2 SPORT blocks after a command, 1 after a `80000000` poll and
+  after the last byte of a status frame. Without this, replies arrive after the ARM's 18
+  polls, or several version requests overwrite each other's reply.
+- A command word that arrives while the DSP transmits is held and delivered later; an
+  `FFFFFFFF` read word that arrives while it receives is not delivered.
+- Other QEMU pieces the link needed: RSPI receive-trigger level (SPBFCR.RXTRG). Without it
+  the ARM's receive ISR ran after the first byte of every word and split words. Also DMAC
+  CHSTAT.END is bit 5 (bit 6 is TC; both are set at the end), and RSPI0 RX/TX DMA
+  is modelled (the RX side completes after TX has clocked its bytes).
+- Result: the ARM accepts the main-DSP and FPGA versions, so the boot popup changes from
+  "DSP/FPGA firmware is wrong version" to **"DV DSP firmware is wrong version"**. The DV DSP
+  (C5517, `c55sim.py`) is not linked yet; the main DSP relays its version.

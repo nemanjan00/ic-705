@@ -64,6 +64,7 @@ class Sharc:
         self.sreg = {n: 0 for n in D.UREG_G7}
         self.dpi_irptl = 0
         self.tickers = []
+        self.flags_hooks = []                  # f(old, new) on FLAGS writes (chip selects)
         self.irqstk = []                       # interrupts in service: (number, reg, bit)
         self.sreg['MODE1'] = 0
         self.ustat = {}
@@ -302,6 +303,9 @@ class Sharc:
             if name == 'MODE1':
                 self.set_mode1(v)
             else:
+                if name == 'FLAGS' and self.flags_hooks:
+                    for h in self.flags_hooks:
+                        h(self.sreg['FLAGS'], v)
                 self.sreg[name] = v
 
     # ------------------------------------------------------------- DAG
@@ -1295,18 +1299,28 @@ class Spi:
     """ADSP-214xx SPI / SPIB (IOP 0x1000.. / 0x2800..): SPICTL +0, SPIFLG +1, SPISTAT +2
     (SPIF bit 0, TXS bit 3, RXS bit 5), TXSPI +3, RXSPI +4, SPIBAUD +5, RXSPI_SHADOW +6.
     Transfers complete at once; the attached device (callable byte -> byte) answers, default
-    0xFF. Every transfer is logged in .log as (tx, rx)."""
+    0xFF. A TXSPI write starts a transfer; with TIMOD = 00 a read of RXSPI does (tx logged as
+    None). Every transfer is logged in .log as (tx, rx)."""
     def __init__(self, base, device=None):
         self.base, self.device = base, device
         self.r = {}
         self.rx = None
         self.log = []
 
+    def read_mode(self):
+        """SPIEN (bit 14) with TIMOD (bits 1..0) = 00: a core read of RXSPI starts the next
+        transfer, so a received word is always waiting."""
+        ctl = self.r.get(0, 0)
+        return ctl >> 14 & 1 and ctl & 3 == 0
+
     def rd(self, sim, a):
         o = a - self.base
         if o == 2:
-            return 0x01 | (0x20 if self.rx is not None else 0)
+            return 0x01 | (0x20 if self.rx is not None or self.read_mode() else 0)
         if o in (4, 6):
+            if self.rx is None and self.read_mode():
+                self.rx = self.device(0) if self.device else 0xFF
+                self.log.append((None, self.rx))
             v = self.rx if self.rx is not None else 0
             if o == 4:
                 self.rx = None
@@ -1320,6 +1334,72 @@ class Spi:
             rxv = self.device(v) if self.device else 0xFF
             self.rx = rxv
             self.log.append((v, rxv))
+
+
+class SpibLink(Spi):
+    """SPIB as a slave on an external master (the ARM's RSPI0): `xfer(sim, byte)` clocks one
+    8-bit frame and returns the DSP's output byte. With SPIEN (SPICTL bit 14) and DMA enabled
+    (SPIDMACB bit 0), a receive DMA (bit 1) stores the byte at II and outputs 0xFF [INF: idle
+    level]; a transmit DMA outputs the low byte of the word at II. II += IM, C -= 1; at C = 0
+    with chaining (bit 4) the next TCB is loaded from CP (pointer at the II word, read
+    downward like the SPORT TCBs). Without DMA the line idles at 0xFF. Each byte is
+    appended to .bytes as (mode, in, out)."""
+    def __init__(self, base=0x2800):
+        super().__init__(base)
+        self.bytes = []
+
+    def xfer(self, sim, b):
+        R = self.r
+        out, mode = 0xFF, '-'
+        dmac = R.get(0x84, 0)
+        if R.get(0, 0) >> 14 & 1 and dmac & 1 and R.get(0x82, 0):
+            a = 0x80000 + (R.get(0x80, 0) & 0x7FFFF)
+            if dmac & 2:
+                sim.wr(a, b)
+                mode = 'r'
+            else:
+                out = sim.rd(a) & 0xFF
+                mode = 't'
+            R[0x80] = (R.get(0x80, 0) + s32(R.get(0x81, 0))) & M32
+            R[0x82] = R[0x82] - 1
+            if R[0x82] == 0 and dmac & 0x10 and R.get(0x83, 0) & 0x7FFFF:
+                p = 0x80000 + (R[0x83] & 0x7FFFF)
+                R[0x80], R[0x81], R[0x82], R[0x83] = (sim.rd(p), sim.rd(p - 1),
+                                                      sim.rd(p - 2), sim.rd(p - 3))
+        self.bytes.append((mode, b, out))
+        return out
+
+
+class SpiNor:
+    """SPI-NOR flash on the DSP's SPI master: the DSP/FPGA configuration flash the ARM also
+    reads on RSPI4 (FW 0x12CFB5: READ 03 + 24-bit address, MSB first; chip select = FLAG8,
+    FLAGS bit 16, low = selected). The DSP reads its version tags from it (8 ASCII bytes at
+    0x40000, 0x80000, 0x180000; routine 0x1273D0). Only READ is modelled."""
+    def __init__(self, sim, image):
+        self.sim, self.img = sim, image
+        self.n, self.cmd, self.addr = 0, 0, 0
+        sim.flags_hooks.append(self.flags)
+
+    def flags(self, old, new):
+        if (old ^ new) >> 16 & 1:             # FLAG8 edge: a new transaction
+            self.n = 0
+
+    def __call__(self, b):
+        if self.sim.sreg['FLAGS'] >> 16 & 1:  # not selected
+            return 0xFF
+        i = self.n
+        self.n += 1
+        if i == 0:
+            self.cmd = b
+            return 0xFF
+        if i <= 3:
+            self.addr = (self.addr << 8 | b) & 0xFFFFFF
+            return 0xFF
+        if self.cmd == 0x03:
+            v = self.img[self.addr] if self.addr < len(self.img) else 0xFF
+            self.addr += 1
+            return v
+        return 0xFF
 
 
 class Twi:

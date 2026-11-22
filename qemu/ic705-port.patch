@@ -178,22 +178,52 @@ index 0000000..2e7d5bc
 +
 +type_init(bq_register)
 diff --git a/qemu-machine/src/dmac.c b/qemu-machine/src/dmac.c
-index e85ce07..9ca2817 100644
+index e85ce07..602fcaf 100644
 --- a/qemu-machine/src/dmac.c
 +++ b/qemu-machine/src/dmac.c
-@@ -177,6 +177,7 @@ struct RZA1HDmacState {
+@@ -177,6 +177,8 @@ struct RZA1HDmacState {
      bool stream_running;        /* stream_timer is running */
      uint8_t stream_set[RZA1H_DMAC_CHANNELS];   /* register set the next completion uses */
      uint32_t chstat[RZA1H_DMAC_CHANNELS];      /* ch1-7 CHSTAT (EN, END, SR) */
 +    QEMUTimer *gen_timer[RZA1H_DMAC_CHANNELS]; /* IC-705 generic block transfers */
++    uint32_t gen_defer;                        /* channels whose move happens at completion */
      uint64_t stream_blocks[RZA1H_DMAC_CHANNELS];
      uint64_t stream_overruns[RZA1H_DMAC_CHANNELS]; /* END still set at the next block */
      uint8_t sdhi_armed;         /* SETEN'd channels with SDHI0 on one side */
-@@ -448,6 +449,20 @@ static void rza1h_dmac_sdhi_dreq(void *opaque, int n, int level)
+@@ -205,7 +207,7 @@ struct RZA1HDmacState {
+ #define DMAC_N1TB 0x14
+ #define DMAC_CHSTAT 0x24
+ #define DMAC_CHSTAT_EN  (1u << 0)
+-#define DMAC_CHSTAT_END (1u << 6)
++#define DMAC_CHSTAT_END (3u << 5) /* END (bit 5) + TC (bit 6) */
+ #define DMAC_CHSTAT_SR  (1u << 7)
+ #define DMAC_CHCTRL_CLREN  (1u << 1)
+ #define DMAC_CHCTRL_SWRST  (1u << 3)
+@@ -448,6 +450,48 @@ static void rza1h_dmac_sdhi_dreq(void *opaque, int n, int level)
      }
  }
  
 +static RZA1HDmacState *dmac_gen_owner;
++
++static void rza1h_dmac_gen_move(RZA1HDmacState *s, int ch)
++{
++    hwaddr base = ch * DMAC_CH_STRIDE;
++    uint32_t src = dmac_reg32(s, base + DMAC_N0SA_0);
++    uint32_t dst = dmac_reg32(s, base + DMAC_N0DA_0);
++    uint32_t count = dmac_reg32(s, base + DMAC_N0TB_0);
++    uint32_t cfg = dmac_reg32(s, base + DMAC_CHCFG_0);
++    static const int sz[8] = { 1, 2, 4, 8, 16, 32, 64, 128 };
++    int unit = sz[(cfg >> 16) & 7];
++    uint8_t buf[128];
++
++    for (uint32_t off = 0; off < count; off += unit) {
++        int u = MIN((uint32_t)unit, count - off);
++        address_space_read(&address_space_memory, src + ((cfg & DMAC_CHCFG_SAD) ? 0 : off),
++                           MEMTXATTRS_UNSPECIFIED, buf, u);
++        address_space_write(&address_space_memory, dst + ((cfg & DMAC_CHCFG_DAD) ? 0 : off),
++                            MEMTXATTRS_UNSPECIFIED, buf, u);
++    }
++}
 +
 +static void rza1h_dmac_gen_done(void *opaque)
 +{
@@ -201,7 +231,15 @@ index e85ce07..9ca2817 100644
 +    RZA1HDmacState *s = dmac_gen_owner;
 +    hwaddr base = ch * DMAC_CH_STRIDE;
 +
++    if (s->gen_defer & (1u << ch)) {
++        /* reads from a serial receiver happen at the end, after the transmit side (often
++         * another channel started just after this one) has clocked its bytes */
++        s->gen_defer &= ~(1u << ch);
++        rza1h_dmac_gen_move(s, ch);
++    }
 +    s->chstat[ch] = DMAC_CHSTAT_END;
++    rza1h_debug("dmac", "ch%d generic done, cfg %#x%s", ch, dmac_reg32(s, base + DMAC_CHCFG_0),
++                (dmac_reg32(s, base + DMAC_CHCFG_0) & DMAC_CHCFG_DEM) ? " (DEM: no irq)" : "");
 +    if (!(dmac_reg32(s, base + DMAC_CHCFG_0) & DMAC_CHCFG_DEM)) {
 +        qemu_irq_pulse(s->irq[ch]);
 +    }
@@ -210,10 +248,28 @@ index e85ce07..9ca2817 100644
  static void rza1h_dmac_seten(RZA1HDmacState *s, int ch)
  {
      hwaddr base = ch * DMAC_CH_STRIDE;
-@@ -476,6 +491,30 @@ static void rza1h_dmac_seten(RZA1HDmacState *s, int ch)
+@@ -476,6 +520,48 @@ static void rza1h_dmac_seten(RZA1HDmacState *s, int ch)
          rza1h_dmac_sdhi_move(s);
          return;
      }
++    if (rza1h_board_ic705() && (src == RZA1H_RSPI0_SPDR || dst == RZA1H_RSPI0_SPDR)) {
++        /* IC-705: RSPI0 = the main-DSP link (FW 0x20200244 / 0x201FFA44): RX DMA from SPDR
++         * (deferred to completion), TX DMA into SPDR. */
++        uint32_t cfg = dmac_reg32(s, base + DMAC_CHCFG_0);
++        static const int sz[8] = { 1, 2, 4, 8, 16, 32, 64, 128 };
++        int unit = sz[(cfg >> 16) & 7];
++
++        s->chstat[ch] = DMAC_CHSTAT_EN;
++        if (src == RZA1H_RSPI0_SPDR) {
++            s->gen_defer |= 1u << ch;
++        } else {
++            rza1h_dmac_gen_move(s, ch);
++        }
++        rza1h_debug("dmac", "ch%d rspi0: src=%#x dst=%#x count=%u", ch, src, dst, count);
++        timer_mod(s->gen_timer[ch], qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
++                  (int64_t)(count / unit + 2) * 1000);
++        return;
++    }
 +    if (rza1h_board_ic705() && ((dst >= 0xFCFE3000 && dst < 0xFCFE4000) ||
 +                                 (src >= 0xFCFE3000 && src < 0xFCFE4000))) {
 +        /* IC-705: generic block transfer to/from the GPIO block (ch2 plays the touch-controller command
@@ -241,7 +297,7 @@ index e85ce07..9ca2817 100644
      if (src != RZA1H_RSPI2_SPDR && dst != RZA1H_RSPI2_SPDR) {
          rza1h_debug("dmac", "ch%d SETEN ignored (src=%#x dst=%#x count=%u): "
                     "not an RSPI2 transfer", ch, src, dst, count);
-@@ -566,7 +605,10 @@ static void rza1h_dmac_init(Object *obj)
+@@ -566,7 +652,10 @@ static void rza1h_dmac_init(Object *obj)
      sysbus_init_irq(sbd, &s->irq0);
      for (int ch = 1; ch < RZA1H_DMAC_CHANNELS; ch++) {
          sysbus_init_irq(sbd, &s->irq[ch]);   /* sysbus IRQ index ch */
@@ -254,7 +310,7 @@ index e85ce07..9ca2817 100644
  
 diff --git a/qemu-machine/src/dmac_hi.c b/qemu-machine/src/dmac_hi.c
 new file mode 100644
-index 0000000..9dfd6d9
+index 0000000..24e9e67
 --- /dev/null
 +++ b/qemu-machine/src/dmac_hi.c
 @@ -0,0 +1,203 @@
@@ -292,7 +348,7 @@ index 0000000..9dfd6d9
 +#define CHCTRL 0x28
 +#define CHCFG 0x2c
 +#define ST_EN (1u << 0)
-+#define ST_END (1u << 6)
++#define ST_END (3u << 5)      /* END (bit 5) + TC (bit 6): both set when a transfer ends */
 +#define CTL_SETEN (1u << 0)
 +#define CTL_CLREN (1u << 1)
 +#define CTL_SWRST (1u << 3)
@@ -1203,10 +1259,10 @@ index c7d220e..0da2f79 100644
           * No backing `-drive` is given, so `writable` defaults true in-memory-only (see
 diff --git a/qemu-machine/src/rspi_gen.c b/qemu-machine/src/rspi_gen.c
 new file mode 100644
-index 0000000..7304927
+index 0000000..fcb4ba4
 --- /dev/null
 +++ b/qemu-machine/src/rspi_gen.c
-@@ -0,0 +1,280 @@
+@@ -0,0 +1,347 @@
 +/*
 + * RZ/A1H RSPI (channels 0..4) -- generic register model, written for the IC-705 port.
 + *
@@ -1229,6 +1285,8 @@ index 0000000..7304927
 +#include "hw/core/qdev-properties.h"
 +#include "rz_a1h.h"
 +#include "rza1h_debug.h"
++#include <sys/socket.h>
++#include <sys/un.h>
 +
 +#define SPCR 0x00
 +#define SPSR 0x03
@@ -1262,6 +1320,16 @@ index 0000000..7304927
 +    uint32_t addr;
 +    bool wel;
 +    qemu_irq irq_rx, irq_tx;
++    /* RZA1H_RSPI<n>_SOCK=path: the attached device is an external process on a Unix
++     * socket; each clocked byte is sent as (flags, byte) -- flags bit 0 = first byte since
++     * the last SPCR write, i.e. a new chip-select frame -- and (reply byte, line state) read
++     * back (blocking). Line state bit 7 set = drive the input pin named by
++     * RZA1H_RSPI<n>_SOCK_PIN=port_bit to bit 0 (the device's handshake output). The IC-705
++     * main DSP (tools/dsp_bridge.py, ADSP-21478 simulator) sits on RSPI3 with its FLAG2 on
++     * P7_6. */
++    int sock;
++    bool frame_start;
++    int pin_port, pin_bit;
 +};
 +
 +static uint8_t nor_byte(RZA1HRspiGState *s, uint8_t tx)
@@ -1338,15 +1406,42 @@ index 0000000..7304927
 +    if (s->nor) {
 +        return nor_byte(s, tx);
 +    }
++    if (s->sock >= 0) {
++        uint8_t rb[2] = { 0xFF, 0 };
++        uint8_t msg[2] = { s->frame_start ? 1 : 0, tx };
++        s->frame_start = false;
++        if (write(s->sock, msg, 2) != 2 || read(s->sock, rb, 2) != 2) {
++            rza1h_debug("rspi", "rspi%u: socket link lost", s->channel);
++            close(s->sock);
++            s->sock = -1;
++            return 0xFF;
++        }
++        if ((rb[1] & 0x80) && s->pin_port >= 0) {
++            Object *g = object_resolve_path("/machine/gpio", NULL);
++            if (g) {
++                rza1h_gpio_set_input(DEVICE(g), s->pin_port, s->pin_bit, rb[1] & 1);
++            }
++        }
++        return rb[0];
++    }
 +    snprintf(name, sizeof(name), "RZA1H_RSPI%u_MISO", s->channel);
 +    const char *e = getenv(name);
 +    return e ? strtoul(e, NULL, 0) : 0xFF;
 +}
 +
++/* SPBFCR.RXTRG (bits 2..0): receive-buffer fill that raises SPRI (1, 2, 4, 8, 16, 24, 32
++ * frames). The IC-705 sets 4 on RSPI3 (0x32, FW 0x20119304) so its receive ISR runs once per
++ * 4-byte DSP word. */
++static int rx_trigger(RZA1HRspiGState *s)
++{
++    static const int lv[8] = { 1, 2, 4, 8, 16, 24, 32, 32 };
++    return lv[s->regs[SPBFCR] & 7];
++}
++
 +static void update(RZA1HRspiGState *s)
 +{
 +    uint8_t cr = s->regs[SPCR];
-+    qemu_set_irq(s->irq_rx, (cr & SPCR_SPRIE) && s->rx_n > 0);
++    qemu_set_irq(s->irq_rx, (cr & SPCR_SPRIE) && s->rx_n >= rx_trigger(s));
 +    qemu_set_irq(s->irq_tx, (cr & SPCR_SPTIE) && (cr & SPCR_SPE));
 +}
 +
@@ -1357,7 +1452,8 @@ index 0000000..7304927
 +
 +    switch (off) {
 +    case SPSR:
-+        return (s->rx_n ? SPSR_SPRF : 0) | SPSR_TEND | SPSR_SPTEF | (s->regs[SPSR] & 0x1f);
++        return (s->rx_n >= rx_trigger(s) ? SPSR_SPRF : 0) | SPSR_TEND | SPSR_SPTEF |
++               (s->regs[SPSR] & 0x1f);
 +    case SPDR: {
 +        int n = size;               /* frames of 8 bits, LSB first */
 +        for (int i = 0; i < n; i++) {
@@ -1404,6 +1500,7 @@ index 0000000..7304927
 +        s->regs[off] &= v;      /* error flags clear by writing 0 */
 +        break;
 +    case SPCR:
++        s->frame_start = true;
 +        if (s->nor && (s->regs[SPCR] & SPCR_SPE) && !(v & SPCR_SPE)) {
 +            nor_end(s);
 +        }
@@ -1436,6 +1533,32 @@ index 0000000..7304927
 +{
 +    RZA1HRspiGState *s = RZA1H_RSPI_GEN(dev);
 +    char name[32];
++    s->sock = -1;
++    s->pin_port = -1;
++    snprintf(name, sizeof(name), "RZA1H_RSPI%u_SOCK_PIN", s->channel);
++    const char *pp = getenv(name);
++    if (pp && sscanf(pp, "%d_%d", &s->pin_port, &s->pin_bit) != 2) {
++        s->pin_port = -1;
++    }
++    snprintf(name, sizeof(name), "RZA1H_RSPI%u_SOCK", s->channel);
++    const char *sp = getenv(name);
++    if (sp) {
++        struct sockaddr_un sa = { .sun_family = AF_UNIX };
++        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
++        g_strlcpy(sa.sun_path, sp, sizeof(sa.sun_path));
++        for (int tries = 0; fd >= 0 && tries < 100; tries++) {
++            if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) == 0) {
++                s->sock = fd;
++                break;
++            }
++            g_usleep(100000);
++        }
++        if (s->sock < 0 && fd >= 0) {
++            close(fd);
++        }
++        rza1h_debug("rspi", "rspi%u: device on %s %s", s->channel, sp,
++                    s->sock >= 0 ? "connected" : "NOT connected");
++    }
 +    snprintf(name, sizeof(name), "RZA1H_RSPI%u_FLASH", s->channel);
 +    const char *path = getenv(name);
 +    if (path) {
@@ -2118,7 +2241,7 @@ index 2342e9e..51dc520 100644
      mc->default_ram_size = RZA1H_RAM_SIZE;
      mc->default_ram_id = "rza1h.ram";
 diff --git a/qemu-machine/src/rz_a1h.h b/qemu-machine/src/rz_a1h.h
-index 9aac7c4..41b88fc 100644
+index 9aac7c4..c94e220 100644
 --- a/qemu-machine/src/rz_a1h.h
 +++ b/qemu-machine/src/rz_a1h.h
 @@ -134,6 +134,16 @@
@@ -2138,7 +2261,15 @@ index 9aac7c4..41b88fc 100644
  
  /* riic.c -- matches emu/peripherals/riic.py's per-instance base addresses
   * (RIIC0-2, stride 0x400). RIIC2 is the diode-matrix EEPROM's controller,
-@@ -272,4 +282,13 @@
+@@ -235,6 +245,7 @@
+ #define RZA1H_RSPI2_BASE 0xE800D800
+ #define RZA1H_RSPI2_SIZE 0x00000024
+ #define RZA1H_RSPI2_SPDR 0xE800D804
++#define RZA1H_RSPI0_SPDR 0xE800C804  /* IC-705 main-DSP link */
+ #define RZA1H_RSPI2_SPRI_IRQ 277 /* RSPISPRI2, the FPGA sweep-read handler */
+ #define TYPE_RZA1H_RSPI2 "rza1h-rspi2"
+ 
+@@ -272,4 +283,13 @@
  #define RZA1H_ADC_SIZE 0x00000100
  #define TYPE_RZA1H_ADC "rza1h-adc"
  

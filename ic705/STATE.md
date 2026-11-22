@@ -4,6 +4,14 @@ Tags: [FW] firmware static · [HW] radio · [VM] emulator · [EXT] outside · [I
 
 ## Now
 
+- **2026-11-22: main DSP linked into the radio [VM].** QEMU's RSPI3 (the ARM's real main-DSP
+  link) talks over a socket to `tools/dsp_bridge.py`, which runs the SHARC firmware in
+  `sharc_sim.py`. With the time sync and the DSP's own flash reads, the ARM accepts the
+  main-DSP and FPGA versions, and the boot popup now reads **"DV DSP firmware is wrong
+  version"**. Next: link the DV DSP (`c55sim.py`) behind the main DSP and find how its version
+  reaches the ARM. (RSPI0 is not the DSP link; it carries length-framed packets, probably
+  for the wireless unit.)
+
 - **2026-11-22: DV DSP firmware runs in `tools/c55sim.py`** (whole-firmware C55x core) to its
   main loop. The ARM reaches the DV DSP only through the main DSP (DV version arrives in the
   RSPI0 main-DSP handler `0x20202128`), so linking it needs the main DSP as well. **Main DSP = ADSP-21478 SHARC** (service manual IC202); boot-stream encoding solved

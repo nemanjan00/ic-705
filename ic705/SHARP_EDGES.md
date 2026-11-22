@@ -59,6 +59,19 @@ Symptom → cause → fix. Append the moment one bites.
 - **Firmware divides by zero on purpose-free paths** (RECIPS 0 -> inf -> NaN -> FIX = all
   ones); a simulator that throws on NaN stops a firmware that runs fine on silicon. [VM]
 
+- **"Which bus is the DSP on" from one handler name is not proof.** RSPI0's consumer was taken
+  for the DSP link; its packet format (length-framed) does not match the SHARC's 4-byte
+  words, while RSPI3 traffic matched the DSP's own dispatch table byte for byte. Match
+  formats on both ends before wiring. [FW]
+- **A peripheral that raises "RX full" after one byte splits multi-byte words** when the
+  real part waits for a trigger level (RSPI SPBFCR.RXTRG). [VM]
+- **SPI-flash models must see chip-select edges without traffic** (FLAG8 goes high between
+  READs with no byte clocked); resetting only on a byte clocked while deselected merges
+  three READs into one. [VM]
+- **A slow co-simulated chip needs time sync, not tweaks.** Holding QEMU's reply byte (the
+  vCPU waits for it, so the guest clock stops) is the clean pause; QMP `stop` deadlocks
+  while the vCPU holds the big lock inside the device callback. [VM]
+
 ## Updater / delivery
 
 - **A patched DSP region with an unchanged version string is silently not flashed.**
