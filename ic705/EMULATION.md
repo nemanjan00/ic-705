@@ -497,6 +497,50 @@ RZA1H_RSPI3_SOCK_PIN=7_6) [VM]:
   the ARM's receive ISR ran after the first byte of every word and split words. Also DMAC
   CHSTAT.END is bit 5 (bit 6 is TC; both are set at the end), and RSPI0 RX/TX DMA
   is modelled (the RX side completes after TX has clocked its bytes).
-- Result: the ARM accepts the main-DSP and FPGA versions, so the boot popup changes from
-  "DSP/FPGA firmware is wrong version" to **"DV DSP firmware is wrong version"**. The DV DSP
-  (C5517, `c55sim.py`) is not linked yet; the main DSP relays its version.
+- Result (main DSP alone): the ARM accepts the main-DSP and FPGA versions, so the popup moves
+  from "DSP/FPGA firmware is wrong version" to "DV DSP firmware is wrong version".
+- SPIB transmit prefetch: the firmware ends a status frame when CSPIB shows 4n+9 words
+  fetched (0x125C5B), but the ARM stops clocking at the first `10000000` filler word. On the
+  chip the SPI DMA runs ahead of the clock (4-word DMA FIFO + TXSPI, [INF]), so `SpibLink`
+  reports CSPIB 5 words ahead in transmit mode. Without that the DSP stays in transmit mode
+  with P7_6 high, and the ARM drops its next queued command (0x2011EEA8 pops the command,
+  then 0x20118E68 skips sending it while P7_6 is high).
+
+ARM <-> DV DSP link: **RSPI0** on the ARM (master, DMA + PIO polls), C5517 **McSPI** slave
+on the DV DSP; handshake DV GPIO15 -> ARM **P3_8** [FW]:
+- DV side (DSP-B): McSPI interrupt on CPU vectors 9 and 11 (both -> 0x181F9; IER0 0x0AA0). On
+  RX0_FULL it stores CH0RX into an 8 K ring (0x3B640, write index 0x3B638, read 0x3B63A); on
+  TX0_EMPTY it sends the next byte of a 256-byte TX ring (0x3F640, write 0x3B63C, read
+  0x3B63E) while 0x3F844 = 1, else 0xFF; when the ring empties it clears GPIO15
+  (IODATAOUT1 0x1C0A bit 15). 0x1C15 = McSPI interrupt aggregation flag (W1C).
+- Main loop (0x17C18 init once, loop 0x17C6E): link service 0x7D81 -> 0x7D66 -> parser
+  0x7CFB (length byte 2..0xA5, 0xFF = idle) / 0x7C92 (packet body); replies queued by
+  0x6D5A from pending bits 0x6A5A/0x6A5C (jump table 0x1FC24), built by 0x180F9 (append
+  bytes with 0x180D6, then GPIO15 = 1, 0x3F844 = 1). GPIO16 (IOINDATA2 bit 0) high with
+  both rings empty sends the DSP to sleep (0x17F6A).
+- Packets: `[L][type][L-2 data][FF]` both ways. At boot the DV DSP queues a type-0 frame on
+  its own: `16 00 "1.11-000" "1.41-000" 01 01 01 01 FF`; the ARM's `03 00 00 FF` asks for it.
+  The ARM copies the two version strings to 0x203E1B67 (DV version slot, flag +71).
+- The frame often starts while the ARM is still clocking a command (the DSP raised GPIO15
+  earlier): the ARM finds the length byte inside its RX buffer (0x201FFF08) and DMAs the rest.
+- `dv_bridge.py` + `c55sim.McSpi`: the same socket protocol (RZA1H_RSPI0_SOCK,
+  RZA1H_RSPI0_SOCK_PIN=3_8); a byte's reply waits until the handler has read CH0RX and
+  loaded the next TX byte; after the last byte of a packet the DV DSP runs 20 000 more
+  instructions (its main loop parses and may queue a reply).
+- Needed fixes on the way:
+  - **c55sim postfix `xccpart`**: opcode 0x9E/0x9F gates the instruction *before* it
+    (`mov #1,T0` / `xccpart !TC1` / `ret`). Prefix 0x96/0x97 gates the next one. Treating
+    both as prefix skipped `ret`s and fell into the link reset, which is where the "periodic
+    McSPI re-init" noted earlier came from.
+  - c55sim interrupt entry follows the branch stored in the vector slot (IDA does not decode
+    the slots).
+  - QEMU RSPI: while an RX DMA from SPDR is armed, SPRI is not raised (the DMA takes the
+    bytes). Otherwise the ARM's poll ISR stole the first byte of a DMA'd packet and the
+    version arrived with two 0xFF bytes.
+
+**Full-radio result (2026-11-22) [VM]:** with both bridges (`run705_gui.py --dsp`), the
+boot reaches the main screen (14.100.00 USB, VFO A, S-meter) with **no version popup**: the
+ARM accepts main-DSP, FPGA and DV-DSP versions that both DSP firmwares read from their own
+flash and report over the emulated links. Known gaps: the second halves of the DSP-program
+and FPGA tags sometimes get no reply (bridge timing). Audio paths (SPORT/I2S between the
+ARM, both DSPs and the codecs) carry no samples yet. FIR accelerator not modelled.

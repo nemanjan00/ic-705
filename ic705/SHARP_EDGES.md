@@ -66,6 +66,14 @@ Symptom → cause → fix. Append the moment one bites.
 - **"Unidentified register block" plus "chip has no X" is a trap.** The C5517 block at 0x3500
   was the McSPI; once identified from the data sheet's register table, the "DV DSP has no SPI"
   conclusion fell. Look up unknown I/O blocks before drawing link conclusions. [FW]
+- **C55x `xccpart` has a postfix form** (0x9E/0x9F) that gates the *preceding* instruction;
+  treating it as a prefix skipped `ret`s, and the DV DSP kept resetting its link. That looked
+  like firmware behaviour ("periodic re-init"). Check simulator semantics before writing up
+  odd firmware behaviour. [VM]
+- **DMA vs. interrupt on the same receive-full event**: in hardware the DMA wins; a model
+  that lets the CPU ISR run first steals bytes. [VM]
+- **SPI DMA prefetch matters to firmware**: the SHARC firmware judges "frame sent" by the DMA
+  count, which on silicon runs ahead of the clock. [INF]
 - **A peripheral that raises "RX full" after one byte splits multi-byte words** when the
   real part waits for a trigger level (RSPI SPBFCR.RXTRG). [VM]
 - **SPI-flash models must see chip-select edges without traffic** (FLAG8 goes high between

@@ -717,7 +717,13 @@ class C55Sim:
         # context: ST0/ST1 + return address (fast-return layout simplified)
         self.push_sp(self.reg['ST1'])
         self.push_sp(self.reg['ST0'])
-        self.do_call(((self.reg['IVPD'] << 8) + n * 8) & 0xFFFFFF, self.pc)
+        vec = ((self.reg['IVPD'] << 8) + n * 8) & 0xFFFFFF
+        # each 8-byte vector slot holds a branch (0xEA/0xCA + 24-bit byte address; IDA does
+        # not decode the slots as code), so enter the handler directly
+        w0, w1 = self.mem[vec >> 1], self.mem[(vec >> 1) + 1]
+        if w0 >> 8 in (0xEA, 0xCA):
+            vec = (w0 & 0xFF) << 16 | w1
+        self.do_call(vec, self.pc)
         self.setbit('INTM', 1)
         return True
 
@@ -746,9 +752,21 @@ class C55Sim:
                 break
             group.append(p)
             nxt += p['size']
+        # postfix conditional execution: `instr` followed by an xcc/xccpart whose opcode byte
+        # is 0x9E/0x9F (e.g. `mov #1,T0` / `9E F4 xccpart !TC1` / `ret`) is the parallel pair
+        # "instr || if (cond) execute" -- the condition gates the instruction *before* it.
+        # The prefix form (0x96/0x97) gates the next instruction (op_xcc).
+        p = self.code.get(nxt)
+        gated = None
+        if p is not None and p['base'] in ('xcc', 'xccpart') and self.byte_at(nxt) in (0x9E, 0x9F):
+            gated = p
+            nxt += p['size']
         self.pc = nxt
         if self.trace is not None:
             self.trace.append(ea)
+        if gated is not None and not self.cond(self.ops(gated)[0]):
+            self.cycles += 1
+            return
         self.post_t = []
         for g in group:
             self.exec1(g)
@@ -775,6 +793,10 @@ class C55Sim:
 
     def skip_pending(self):
         return False
+
+    def byte_at(self, ea):
+        w = self.mem[ea >> 1]
+        return w & 0xFF if ea & 1 else w >> 8
 
     def exec1(self, ins):
         base = ins['base']
@@ -1331,7 +1353,13 @@ class C55Sim:
         n = o[0][1]
         self.push_sp(self.reg['ST1'])
         self.push_sp(self.reg['ST0'])
-        self.do_call(((self.reg['IVPD'] << 8) + n * 8) & 0xFFFFFF, self.pc)
+        vec = ((self.reg['IVPD'] << 8) + n * 8) & 0xFFFFFF
+        # each 8-byte vector slot holds a branch (0xEA/0xCA + 24-bit byte address; IDA does
+        # not decode the slots as code), so enter the handler directly
+        w0, w1 = self.mem[vec >> 1], self.mem[(vec >> 1) + 1]
+        if w0 >> 8 in (0xEA, 0xCA):
+            vec = (w0 & 0xFF) << 16 | w1
+        self.do_call(vec, self.pc)
         self.setbit('INTM', 1)
 
     def op_rpt(self, ins, o):
@@ -1402,20 +1430,65 @@ class SysRegs(RegFile):
         return self.r.get(a, 0)
 
 
-class Blk35(RegFile):
-    """I/O 0x3510..0x353C (unidentified; DSP-A and DSP-B init it the same way): after
-    0x3510 is written the firmware waits for 0x3514 bit 0 -> report ready at once."""
+class McSpi(RegFile):
+    """C5517 McSPI at I/O 0x3500 (data sheet table 6-16), channel 0 as a slave on the ARM's
+    RSPI0. SYSSTATUS 0x3514 bit 0 = reset done; IRQSTATUS 0x3518 (write 1 to clear): bit 0
+    TX0_EMPTY, bit 2 RX0_FULL; IRQENABLE 0x351C; CH0STAT 0x3530 (bit 0 RXS, bit 1 TXS);
+    CH0CTRL 0x3534 bit 0 = enable; CH0TX 0x3538; CH0RX 0x353C. `xfer(byte)` clocks one 8-bit
+    frame from the master: the DSP's TX register goes out, the byte lands in RX, both
+    status bits set, and the McSPI interrupt (CPU vectors 9 and 11 both point at the
+    handler, FW 0x181F9) is raised when enabled."""
+    IRQ = 9
+
+    def __init__(self, sim=None):
+        super().__init__()
+        self.sim = sim
+        self.status = 0
+        self.rx, self.tx = 0, 0xFF
+        self.rx_taken = True                 # the handler has read the last byte
+        self.tx_loaded = True                # ... and written the next TX byte
+
     def rd(self, a):
         if a == 0x3514:
-            return self.r.get(a, 0) | 1
+            return 1
+        if a == 0x3518:
+            return self.status
+        if a == 0x3530:
+            return (1 if self.status & 4 else 0) | (2 if self.status & 1 else 0)
+        if a == 0x353C:
+            self.status &= ~4
+            self.rx_taken = True
+            return self.rx
         return self.r.get(a, 0)
+
+    def wr(self, a, v):
+        if a == 0x3518:
+            self.status &= ~v
+            return
+        if a == 0x3538:
+            self.tx = v & 0xFF
+            self.status &= ~1
+            self.tx_loaded = True
+        self.r[a] = v
+
+    def xfer(self, b):
+        if not self.r.get(0x3534, 0) & 1:
+            return 0xFF
+        out = self.tx
+        self.tx = 0xFF                       # underrun: the line idles high
+        self.rx = b
+        self.rx_taken = self.tx_loaded = False
+        self.status |= 5
+        if self.sim and self.status & self.r.get(0x351C, 0):
+            self.sim.raise_irq(self.IRQ)
+        return out
 
 
 def default_board(sim):
     """Map the DV DSP's I/O blocks: SAR ADC, generic register files elsewhere."""
     sim.ports[0x7000] = SarAdc()
     sim.ports[0x1C00] = SysRegs()
-    sim.ports[0x3500] = Blk35()
+    sim.ports[0x3500] = McSpi(sim)
     for base in (0x0000, 0x0C00, 0x0D00, 0x0E00, 0x0F00, 0x1800, 0x1900, 0x1C00, 0x2800,
                  0x2900, 0x2A00, 0x2B00, 0x3000, 0x3500):
         sim.ports.setdefault(base, RegFile())

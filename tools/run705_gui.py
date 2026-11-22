@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """Run the emulated IC-705 in a GTK window and drive its controls from this terminal.
 
-  run705_gui.py [--behavioral-sub] [--substat FILE] [--press-at S] [--hold S] [--eeprom FILE]
+  run705_gui.py [--dsp] [--behavioral-sub] [--substat FILE] [--press-at S] [--hold S] [--eeprom FILE]
+
+--dsp also runs both DSPs on their own firmware: the main DSP (ADSP-21478, sharc_sim.py via
+dsp_bridge.py on RSPI3 / P7_6) and the DV DSP (C5517, c55sim.py via dv_bridge.py on RSPI0 /
+P3_8). With them the boot passes the DSP/FPGA and DV DSP version checks (no popup); the
+radio is slower while the DSPs talk (CPython simulators). Logs go to the scratch directory.
 
 Boot is the real power-on path (ic705/EMULATION.md):
   - sub-CPU = STM32L0 model running the decoded aux2 firmware (RZA1H_SUBCPU_FW)
@@ -37,6 +42,7 @@ DIAL = {'\x1b[C': 1, '\x1b[D': -1, '\x1b[A': 10, '\x1b[B': -10, '\x1b[5~': 100, 
 
 ap = argparse.ArgumentParser()
 ap.add_argument('--behavioral-sub', action='store_true')
+ap.add_argument('--dsp', action='store_true', help='run both DSP simulators (see above)')
 ap.add_argument('--substat', default=os.path.join(Q.SCR, 'substat.txt'))
 ap.add_argument('--press-at', type=float, default=6)
 ap.add_argument('--hold', type=float, default=3)
@@ -52,6 +58,16 @@ if a.behavioral_sub:
     env['RZA1H_IC705_SUBSTAT_FILE'] = a.substat
 else:
     env['RZA1H_SUBCPU_FW'] = f'{FW}/aux2.application.bin'
+bridges = []
+if a.dsp:
+    here = os.path.dirname(os.path.abspath(__file__))
+    for script, name, ch, pin in (('dsp_bridge.py', 'dsp', 3, '7_6'), ('dv_bridge.py', 'dv', 0, '3_8')):
+        path = os.path.join(Q.SCR, f'{name}.sock')
+        bridges.append(subprocess.Popen([sys.executable, os.path.join(here, script), '--sock', path,
+                                         '--log', os.path.join(Q.SCR, f'{name}_bridge.log')]))
+        env[f'RZA1H_RSPI{ch}_SOCK'] = path
+        env[f'RZA1H_RSPI{ch}_SOCK_PIN'] = pin
+    time.sleep(3)
 sock = os.path.join(Q.SCR, 'qmp_gui.sock')
 if os.path.exists(sock):
     os.unlink(sock)
@@ -100,3 +116,5 @@ finally:
     if p.poll() is None:
         q.cmd('quit')
     p.wait()
+    for b in bridges:
+        b.terminate()

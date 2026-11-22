@@ -142,7 +142,7 @@ def serve():
                         log_cmd(w)
                     else:
                         held.append(w)
-                elif not receiving and 0x28 - spib.r.get(0x82, 0x28) >= 4 * sim.rd(0xB2C9A) + 9:
+                elif not receiving and 0x28 - spib.rd(sim, 0x2882) >= 4 * sim.rd(0xB2C9A) + 9:
                     sync[0] = 1    # frame fully read (FW 0x125C5B): let the DSP drop FLAG2
                 lock.release()
                 if sync[0]:

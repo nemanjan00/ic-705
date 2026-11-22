@@ -4,6 +4,13 @@ Tags: [FW] firmware static · [HW] radio · [VM] emulator · [EXT] outside · [I
 
 ## Now
 
+- **2026-11-22: full radio boots clean with both DSPs [VM].** `tools/run705_gui.py --dsp`:
+  ARM + sub-CPU in QEMU, the main DSP (SHARC, `dsp_bridge.py`, RSPI3/P7_6) and the DV DSP
+  (C5517, `dv_bridge.py`, RSPI0 McSPI/P3_8) on their own firmware, FPGA dummy. The main
+  screen shows with no version popup. Next: audio paths (SPORT/I2S between ARM, both DSPs
+  and codecs), FIR accelerator, making the half-tag version replies deterministic, and
+  speed.
+
 - **2026-11-22: main DSP linked into the radio [VM].** QEMU's RSPI3 (the ARM's real main-DSP
   link) talks over a socket to `tools/dsp_bridge.py`, which runs the SHARC firmware in
   `sharc_sim.py`. With the time sync and the DSP's own flash reads, the ARM accepts the

@@ -1344,9 +1344,21 @@ class SpibLink(Spi):
     with chaining (bit 4) the next TCB is loaded from CP (pointer at the II word, read
     downward like the SPORT TCBs). Without DMA the line idles at 0xFF. Each byte is
     appended to .bytes as (mode, in, out)."""
+    # transmit DMA runs ahead of the clock: 4-word DMA FIFO (SPIDMAC.SPIS) + TXSPI [INF]. The
+    # firmware ends a status frame when CSPIB shows 4n+9 words fetched (0x125C5B) while the
+    # ARM stops clocking at the first filler word, so without the lead the DSP never leaves
+    # transmit mode.
+    PREFETCH = 5
+
     def __init__(self, base=0x2800):
         super().__init__(base)
         self.bytes = []
+
+    def rd(self, sim, a):
+        dmac = self.r.get(0x84, 0)
+        if a - self.base == 0x82 and dmac & 3 == 1:      # transmit DMA: count incl. prefetch
+            return max(0, self.r.get(0x82, 0) - self.PREFETCH)
+        return super().rd(sim, a)
 
     def xfer(self, sim, b):
         R = self.r
