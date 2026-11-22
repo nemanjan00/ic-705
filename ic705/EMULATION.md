@@ -255,6 +255,11 @@ UI language is Japanese (factory default: the settings EEPROM is blank).
     is also implausible, and it is not C55x either (RET 0x4804 density 0.27/KB vs ≈6/KB in the
     DV DSP image). Core **unknown** [INF]; a chip marking or a statistical ISA classifier
     (cpu_rec) would settle it.
+    - **Blackfin is the best candidate [INF, medium]:** the code is built from 16-bit units
+      (statistics at offsets 0/2 and 1/3 match), not Nios II (no opcode-0x3A dominance), and
+      Blackfin signatures are strongly over-represented: RTS (`10 00`) 302× vs 2× in random
+      data of equal size, UNLINK (`01 E8 00 00`) 12× vs 0×. Needs a Blackfin disassembler
+      (binutils `bfin-elf`) to confirm.
 - **Input:** touch/keys path not identified yet (not on I2C: RIIC0=EEPROM 0x53,
   RIIC1=0x6B/0x35; most likely via the sub-CPU status frame).
 - No audio, no RF; Wi-Fi/BT/GPS absent.
