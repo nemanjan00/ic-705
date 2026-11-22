@@ -15,8 +15,8 @@ are in [`ic705/EMULATION.md`](ic705/EMULATION.md).
 |---|---|---|
 | Main CPU | Renesas RZ/A1H (Cortex-A9) | Main image on Keil RTX: UI, VDC5 display, SD, settings, radio control; boots and updates the DSPs and FPGA |
 | Sub CPU | STM32L051 class (Cortex-M0+) | Power sequencing, front-panel keys (ADC ladders), dial, charger; talks to the main CPU over a SCIF3 link |
-| Main DSP | Analog Devices ADSP-21478 (SHARC) | Main signal processing; booted by the ARM streaming its program over RSPI4; relays to the DV DSP |
-| DV DSP | TI TMS320C5517 (C55x) | D-STAR digital-voice vocoder path and GMSK modulator; reached by the ARM only through the main DSP |
+| Main DSP | Analog Devices ADSP-21478 (SHARC) | Main signal processing; booted by the ARM streaming its program over RSPI4; control link = its SPIB (slave) on the ARM's RSPI3 |
+| DV DSP | TI TMS320C5517 (C55x) | D-STAR digital-voice vocoder path and GMSK modulator; host link = its McSPI (slave) on the ARM's RSPI0 |
 | FPGA | Intel Cyclone 10 LP class | Glue/RF-side logic; configuration stored in the DSP flash group |
 | Codecs | AKM AK4951 (x2) | Audio ADC/DAC |
 | WLAN | TI CC31xx | Wi-Fi network processor |
@@ -34,15 +34,17 @@ Works:
 - settings EEPROM, with persistence across runs
 - charger sensing, English UI
 
+- **both DSPs on their own firmware** (`--dsp`): the main DSP (SHARC, `tools/sharc_sim.py`)
+  and the DV DSP (C5517, `tools/c55sim.py`) run as co-simulated devices on the ARM's RSPI3
+  and RSPI0. The boot passes the DSP/FPGA and DV DSP version checks and reaches the main
+  screen with no popup (the FPGA stays a dummy)
+
 Open:
 
-- main SHARC DSP: boot-stream decoding and a disassembler are done
-  (`tools/sharc_ldr.py`, `tools/sharc_dis.py`); the simulator is next
-- DV DSP: the whole firmware already runs standalone in `tools/c55sim.py`, but it
-  can join the radio only through the main DSP
-- the remaining boot popup is a DSP/FPGA version mismatch (both DSPs not emulated;
-  the FPGA stays a dummy)
-- codecs and audio, clock, power-off by long press
+- audio: SPORT/I2S paths between the ARM, both DSPs and the codecs carry no samples yet;
+  the SHARC FIR accelerator is not modelled
+- speed (the DSP simulators are CPython) and fully deterministic DSP timing
+- clock, power-off by long press
 
 ## DMR proof of concept
 
@@ -66,7 +68,10 @@ and a software AMBE+2 codec. See [`ic705/POC.md`](ic705/POC.md).
 | `tools/c55sim.py` | Whole-firmware TMS320C55x simulator for the DV DSP |
 | `tools/c55_emu.py` | Small C55x interpreter for single DV DSP routines |
 | `tools/sharc_ldr.py` | Decode the main-DSP SHARC boot stream |
-| `tools/sharc_dis.py` | SHARC 48-bit instruction decoder/disassembler |
+| `tools/sharc_dis.py` | SHARC 48-bit and VISA instruction decoder/disassembler |
+| `tools/sharc_sim.py` | Whole-firmware ADSP-21478 simulator for the main DSP (SPI, SPIB, TWI, SPORT DMA models) |
+| `tools/dsp_bridge.py` | Main DSP as QEMU's RSPI3 device (socket, handshake P7_6, time sync) |
+| `tools/dv_bridge.py` | DV DSP as QEMU's RSPI0 device (McSPI slave, handshake P3_8) |
 | `tools/dv_patch_4fsk.py` | Build the 4FSK patch into a decoded DSP image |
 | `tools/dv_mod_poc.py` | Verify the stock and patched modulator against models |
 | `tools/dmr_poc_wav.py` | DMR dibits through the patched modulator to a WAV file |
@@ -80,6 +85,7 @@ You supply `705E140.dat` and the decoded images (see below). Then:
 ```sh
 python3 tools/build_705_flash.py 705E140.dat ~/icom/out/705_flash.bin
 python3 tools/run705_gui.py          # GTK window plus terminal controls
+python3 tools/run705_gui.py --dsp    # ... with both DSPs running their own firmware
 ```
 
 Building the QEMU machine and the environment variables it expects are described in
