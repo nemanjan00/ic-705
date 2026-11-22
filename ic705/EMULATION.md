@@ -11,7 +11,8 @@ what the radio does.
 | ARM updater (DSP flash writer) | **working** | `tools/arm_dsp_update_emu.py`: firmware code with HLE for SD read + SPI-NOR model |
 | ARM full-system (boot RTX, UI, screen) | **boots to the IC-705 UI** (QEMU, IC-705 port of the IC-7300 machine) | `qemu/`, `tools/qemu705.py`, `tools/run705_gui.py`; see "Full-system status" |
 | DV DSP (C55x) | **working for the modulator** | `tools/c55_emu.py`: interprets the IDA-decoded instruction stream; DSPLIB `fir` is emulated at high level |
-| Main DSP, FPGA | out of reach for now | chip/format not identified |
+| Sub-CPU (STM32L0, aux2 firmware) | **runs its own firmware** inside the QEMU machine (second CPU cluster) | `qemu/ic705-port.patch` (`stm32l0.c`) |
+| Main DSP, FPGA | out of reach for now | main DSP likely C55x (see below); FPGA stays a dummy by design |
 
 ## `tools/arm_emu.py`
 
@@ -92,7 +93,41 @@ Status: the QEMU build (`qemu-machine/setup.sh`: clone QEMU v11.1.1, symlink the
 `configure --target-list=arm-softmmu`, ninja) **needs the owner's approval to run**; it
 was blocked by the session's permission policy.
 
-## Full-system status (2026-11-21) [VM]
+## Full-system status (2026-11-22) [VM]
+
+The stock IC-705 E 1.40 firmware boots on the patched `rz-a1h` QEMU machine
+(`RZA1H_BOARD=ic705`) **through the real power-on path, with no boot hook**, and with the
+**sub-CPU running its own firmware** (decoded `aux2`, STM32L0 / Cortex-M0+). Sequence:
+
+1. Reset: the ARM finds no power-on factor and enters deep standby (WFI at `0x2007848C`);
+   the sub-CPU sleeps in STOP, waiting on EXTI13.
+2. POWER (P3_9 low) while in deep standby: the machine performs a deep-standby cancel
+   (A9 reset, DSFR = bit 10 = POWER-key factor, `RZA1H_DSWAKE_BIT`).
+3. Loader `0x20004840`, DSFR bit 10 branch: sets bit 7 of the u16 at `0xFCFE7020`, waits up
+   to 0x4E000 polls for P8_7 high; on timeout sets P10 bit 3. P8_7 is held low
+   (`RZA1H_PINS=8_7=0`) so the wait times out [FW]/[VM].
+4. Power-state code `0x2007BB10`: DSFR bit 10 + P10 bit 3 → flag `0x20380741` = 1 →
+   dispatcher `0x2007B7C0` a1=1 → full bring-up.
+5. ARM ↔ sub-CPU exchange over SCIF3 (clock-synchronous) ↔ STM32 SPI1 slave with the four
+   handshake lines; the sub reports its version `1.20-E00` (shown in adjust mode as
+   `S 1.20-E00`), so the old 「サブCPUが正常に動作していません」 popup is gone.
+6. Main screen after ~90 s wall time (-icount shift=1).
+
+Screen language came out English in this run (Japanese before; not yet explained [INF]).
+
+**Adjust (service) mode trap [FW]:** `0x2007AF48` selects adjust mode (`0x20380707` = 1,
+"ADJUST MODE" window with M/S/DSP(P)/DSP(D)/FPGA/DV DSP versions) when the power-on flag is
+set, byte `0x203E1F1C` has bits 3 and 7 set, and ARM ADC channel 6 (10-bit) reads
+721..802. The old default of 0x300 (768) for every channel hit that window; channel 6 is
+now 0x3FF. The byte `0x203E1F1C` reads 0x89 after normal power-on, so the ADC window is the
+real discriminator (a jig/ladder level on that channel) [INF].
+
+**Factory block 0xFC0000 [FW]:** `0x20090FA4` checks the tag "ICOM INC 2019.12" at
+`0x18FFFFF0`, a 512-byte header at `0x18FE3F50`, and a byte sum over 0x3FC00 bytes at
+`0x18FC0000`. 0x3FC00 = 480×272×2, so this is a full-screen RGB565 image (the boot logo),
+not calibration data. Absent in the `.dat`, so the emulated radio just skips it.
+
+Earlier (2026-11-21) state, kept for reference:
 
 The stock IC-705 E 1.40 firmware boots on the patched `rz-a1h` QEMU machine
 (`RZA1H_BOARD=ic705`): boot loader → main image → Keil RTX → full bring-up → the
@@ -105,21 +140,26 @@ UI language is Japanese (factory default: the settings EEPROM is blank).
 | Block | Model | Firmware evidence |
 |---|---|---|
 | Flash 16 MiB | slot A at 0, resources at 0xC00000, slot-B tag erased | loader `0x200045F4`, `0x201049F0` |
-| Sub-CPU (SCIF3) | status frames `FC off data… FE` every 10 ms; version `1.20-E00`/`1.00-000`; P7_9 ready/ack follows P7_11 request; live byte overrides via file | RXI3 `0x20120CAC`, TX `0x20120960`, version `0x201211B4`, updater compare `0x2006C708` |
+| Sub-CPU (real) | STM32L0 SoC model `stm32l0.c` (Cortex-M0 in CPU cluster 1; RCC, PWR, FLASH, IWDG, SYSCFG, EXTI, GPIO A-D/H, TIM2/6/21/22, ADC+DMA, DMA1, SPI1 master/slave, USART1); runs decoded aux2. Wiring: SCIF3 SCK/TX/RX ↔ SPI1 slave; ARM P7_11 → sub PC13 (EXTI13, TX request / STOP wake); ARM P5_3 → sub PB5 (RX request); sub PB7 → ARM P7_9 (ack); sub PB4 → ARM P5_4 (sub has data) | sub: `0x800220C` power loop, `0x8003F48` TX, `0x8004018` RX, `0x80039EC` EXTI ISR; ARM: `0x20120960`, `0x20120CAC` |
+| Sub-CPU (behavioural, when `RZA1H_SUBCPU_FW` unset) | status frames `FC off data… FE` every 10 ms; version `1.20-E00`/`1.00-000`; P7_9 ready/ack follows P7_11 request; live byte overrides via file | RXI3 `0x20120CAC`, TX `0x20120960`, version `0x201211B4`, updater compare `0x2006C708` |
 | MTU2 | general model (all channels, compare/clear/overflow, IRQs) | TGI4A starts ADC `0x20005C48`; TGRC_4 at +0x228 |
 | ADC | single-conversion ADF, per-channel values | `0x201185AC`; supply class `0x2000B770` (≥0x28B = DC) |
 | DMAC ch8–15 | generic block transfers + DMAINT | ch10 GPIO bit-bang `0x2011EBBC`; ch15 SCIF3 TX |
 | RSPI0–4 | generic SPI master; RSPI4 backed by SPI-NOR (DSP group image) | DSP flash `0x2006A218`; RSPI3 register writes (RF/codec chip) |
 | GPIO | P3_9 POWER (active low), P7_9 sub-CPU handshake, live `pins` QOM property | `0x2011D6EC`, `0x20120960` |
-| Deep standby | DSFR reset value | `0x2007BB10` |
+| Deep standby | DSFR reset value; STBCR1 bits 7:6 + WFI = deep standby; POWER press cancels it (A9 reset, DSFR factor bit) | `0x2007BB10`, `0x20078278`, loader `0x20004840` |
 | (from the IC-7300 machine, unchanged) | GIC, OSTM, WDT, RIIC0-2 (+EEPROM, RTC), SCIF, SDHI, VDC5 compositor, OpenVG, L2C | — |
 
 ### Known gaps
 
-- **Boot hook:** the power-mode dispatcher `0x2007B7C0` gets a1=3 (standby/charge) because
-  the sub-CPU power-on handshake is not modelled; `--force-on` sets a1=1. Pulsing sub-CPU
-  status byte 0 also drives the power/display state (splash appears), the likely real
-  wake path.
+- ~~Boot hook~~: solved, see the power-on sequence above (`--force-on` is kept in
+  `qemu705.py` for runs without the sub-CPU firmware).
+- **Main DSP and DV DSP not emulated:** the main DSP looks like a TI C55x (the region-0
+  "DSP-A" boot table writes C5517/C5535-style system registers 0x1C00–0x1C23 and is
+  probably its loader, pulling the program from flash 0x40000; header "30601120", code
+  0x40028–0x633E4; data blob at 0x80000 with an offset/length table) [INF]. Needs a
+  full C55x core + McBSP/I2S/SPI/DMA models; `tools/c55_emu.py` only interprets single
+  functions.
 - **DSP/FPGA are dummies:** the firmware shows 「DSP/FPGAのファームウェアバージョンが
   異なります」 because the main DSP / DV DSP / FPGA never answer the version handshake on
   RSPI0 (`0x201FB8E8`, `0x20201F4C`; ready line P3_8; DMA ch5/13). The installed-version
@@ -132,7 +172,7 @@ UI language is Japanese (factory default: the settings EEPROM is blank).
 
 ```sh
 python3 tools/build_705_flash.py 705E140.dat ~/icom/out/705_flash.bin
-python3 tools/run705_gui.py                 # GTK window
+python3 tools/run705_gui.py                 # GTK window, real power-on, real sub-CPU
 python3 tools/qemu705.py --force-on --secs 60 --shot out.png   # headless + screenshot
 echo 0=ff > <scratch>/substat.txt           # poke sub-CPU status byte 0 live
 ```

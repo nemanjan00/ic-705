@@ -1,8 +1,8 @@
 # IC-705 port of the rz-a1h QEMU machine
 
 Base: https://github.com/jeskko/ic7300-homebrew `qemu-machine/` (MIT, (c) its authors),
-commit `84fb65b`. `git apply ic705-port.patch` in that tree (it adds `src/mtu2g.c` and the
-build/symlink entries), then run `qemu-machine/setup.sh`.
+commit `84fb65b`. `git apply ic705-port.patch` in that tree (it adds `src/mtu2g.c`, `dmac_hi.c`, `rspi_gen.c`,
+`stm32l0.c/.h` and the build/symlink entries), then run `qemu-machine/setup.sh`.
 
 Run with `RZA1H_BOARD=ic705` (see `../tools/qemu705.py`). Board-specific behaviour:
 
@@ -26,7 +26,14 @@ proper power-on reason.
 | SPI-NOR on RSPI4 (`RZA1H_RSPI4_FLASH`) | `rspi_gen.c` | DSP/FPGA config flash, 16 MiB, `0x2006A218` |
 | sub-CPU P7_9 ack follows P7_11 request; P7_9 idle high | `gpio.c` | `0x20120960` handshake |
 | sub-CPU version `1.20-E00`/`1.00-000`, live status file `RZA1H_IC705_SUBSTAT_FILE` | `scif.c` | `0x201211B4`, `0x2006C708` |
+| STM32L0 sub-CPU SoC (`stm32l0.c`), wired when `RZA1H_SUBCPU_FW=<aux2.application.bin>` | `stm32l0.c`, `rz_a1h.c`, `scif.c`, `gpio.c` | sub-CPU firmware drives SPI1 slave on SCIF3 + handshake lines (see `../ic705/EMULATION.md`) |
+| deep-standby cancel on POWER (`RZA1H_DSWAKE_BIT`, default 13; use 10) | `rz_a1h.c` | `0x20078278` enters deep standby; loader `0x20004840` handles DSFR bit 10 |
+| GPIO output/pin hooks, `rza1h_gpio_set_input` | `gpio.c` | handshake lines P7_11/P5_3 out, P7_9/P5_4 in |
+| SCIF TX hook + sync-mode RX clocking | `scif.c` | SCIF3 is the SPI master clocking the sub-CPU |
 
 Status (2026-11-21, earlier): reaches the RTX idle task with the UI drawn (480x272): TX icon,
 battery, mode tab, digits, BLANK label, and an error dialog (red X) -- text glyphs
 missing, error presumably from the dummy DSP/FPGA.
+
+Status (2026-11-22): real POWER-key power-on with the real sub-CPU firmware reaches the main
+screen (see `../ic705/EMULATION.md`); remaining popup = DSP/FPGA version mismatch.

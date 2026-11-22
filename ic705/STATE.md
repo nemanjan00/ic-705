@@ -4,6 +4,16 @@ Tags: [FW] firmware static · [HW] radio · [VM] emulator · [EXT] outside · [I
 
 ## Now
 
+- **2026-11-22: real power-on + real sub-CPU [VM].** POWER press → deep-standby cancel →
+  full bring-up → main screen, no boot hook; the STM32L0 sub-CPU runs its own decoded
+  firmware in the same QEMU machine (`EMULATION.md` "Full-system status (2026-11-22)").
+  Adjust-mode trap understood (ARM ADC ch6 window 721..802). Remaining boot popup:
+  DSP/FPGA version mismatch, because the main DSP and DV DSP are not emulated.
+  **Next:** identify/confirm the main DSP core (C55x?) and its host link (RSPI0 command
+  queue `0x20201F4C`, ready P3_8), then decide between a full C55x core in QEMU or a
+  firmware-accurate version responder; FPGA stays a dummy (owner's choice). Input path
+  (keys/touch/dial) still unidentified.
+
 - **2026-11-21: DMR modulator PoC done [VM]** (`POC.md`). The patched DV DSP `gmsk_mod_bit`
   produces DMR 4FSK that dsd-neo locks onto, identical to an ideal reference. The
   patched DSP group is re-sealed into a `.dat` that the independent decoder accepts
@@ -34,7 +44,7 @@ None — no radio access so far; static analysis of `705E140.dat` (MD5 `2c9c1d7f
 
 ## Open questions
 
-- Main DSP chip/format (`0x40000`, `0x80000` blobs; the latter is neither LZSS nor autokey).
+- Main DSP chip/format (`0x40000`, `0x80000` blobs; the latter is neither LZSS nor autokey). Likely C55x loaded by the region-0 DSP-A stub [INF].
 - Is SCIF5 the DV DSP host link; its frame format.
 - I2S0 peer (main DSP vs FPGA); per-mode gain after the DV DSP.
 
