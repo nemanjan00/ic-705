@@ -11,8 +11,8 @@
 | WLAN | TI SimpleLink CC31xx ("NWP" abort strings, `/sys/BTL_sflash.ptc`) | WLAN group | [FW] |
 | Sub CPU (`aux2`) | Cortex-M, 64 KiB at `0x08000000`, RCC `0x40021000`, GPIO `0x5000xxxx` → STM32G0/L0 class | aux group | [FW] chip family [INF] |
 | `aux1` | 896-byte Thumb stub at `0x20000008` | aux group | [FW] |
-| Main DSP | "DSP Program 1.12 / DSP Data 1.00" — chip **not yet identified** | DSP group, blobs at `0x40000` / `0x80000` [INF] | [EXT: Icom version list] |
-| DV DSP | TI C55x (C5505/C5515/C5535 class); version `1.11` | DSP group, boot table at `0x10000` | [FW] |
+| Main DSP ("IF-DSP", IC202) | **Analog Devices ADSP-21478** (SHARC 2147x) | DSP group, program stream at flash `0x40008`, data at `0x80000`; booted by the ARM over RSPI4 | [EXT: service manual parts list] |
+| DV DSP (IC602) | **TI TMS320C5517** (C55x); version `1.11` | DSP group, boot table at `0x10000` | [FW], part [EXT: service manual] |
 | FPGA | Intel/Altera (Cyclone IV E / 10 LP class), 2.79 Mbit RBF stored bit-reversed | DSP group `0x180000` | vendor [FW], part [INF] |
 
 Version list from Icom's 1.40 notes [EXT]: Main 1.40, Sub 1.01, DSP Program 1.12,
@@ -70,3 +70,25 @@ antenna → RF → ADC → FPGA (DDC, IF filter?, FM discr.?) ──┐
 - The FPGA→main-DSP baseband is reported as **12 kHz wide at 36 kHz** sample rate
   [EXT: VA7OJ test report, quoted in sq6emm/icom-custom-firmware#6].
 - Who sits on the other end of the DV DSP's I2S0 (FPGA or main DSP) is **open** [INF].
+
+## Parts from the service manual [EXT]
+
+Source: IC-705 service manual (S-15707XZ-C1, October 2020), supplied by the owner (not in
+the repo). Inside-view labels and schematic part numbers:
+
+| Ref | Function | Part |
+|---|---|---|
+| IC701 | main CPU | Renesas R7S721001 (RZ/A1H) |
+| IC901 | sub CPU | ST STM32L051R8 (Cortex-M0+) |
+| IC202 | IF-DSP (main DSP) | Analog Devices ADSP-21478 (SHARC) |
+| IC602 | DV DSP ("fixed-point DSP") | TI TMS320C5517 |
+| IC521 | FPGA | Intel Cyclone 10 LP 10CL025 |
+| IC251, IC301 | 24-bit stereo codecs | AKM AK4951 |
+| IC704 | 128 MB flash | — |
+| IC553 | 16-Mbit serial flash | — |
+| IC751 | real-time clock module | (RX-8803 in the VM) |
+| IC753 | tri-axis accelerometer | — |
+| IC1101 / IC1131 | WLAN / Bluetooth modules | — |
+| IC111 | 8-channel 8-bit D/A converter | — |
+
+The block diagram labels separate "IF-DSP BOOT UP" and "DVDSP BOOT UP" signals.
