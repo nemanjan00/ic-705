@@ -6,8 +6,8 @@ Tags: [FW] firmware static · [HW] radio · [VM] emulator · [EXT] outside · [I
 
 - **2026-11-22: DV DSP firmware runs in `tools/c55sim.py`** (whole-firmware C55x core) to its
   main loop. The ARM reaches the DV DSP only through the main DSP (DV version arrives in the
-  RSPI0 main-DSP handler `0x20202128`), so linking it needs the main DSP as well. Main DSP: ISA still unknown (SHARC, DSP563xx, C55x, Nios II and Blackfin checks all
-  negative); needs the part number or a classifier (cpu_rec).
+  RSPI0 main-DSP handler `0x20202128`), so linking it needs the main DSP as well. **Main DSP = ADSP-21478 SHARC** (service manual IC202); boot-stream encoding solved
+  (bit-reversed bytes, LE32, 2×48-bit per 3 words). Next: SHARC decoder + simulator.
 
 - **2026-11-22: real power-on + real sub-CPU [VM].** POWER press → deep-standby cancel →
   full bring-up → main screen, no boot hook; the STM32L0 sub-CPU runs its own decoded

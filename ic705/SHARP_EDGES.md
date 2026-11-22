@@ -56,3 +56,9 @@ Symptom → cause → fix. Append the moment one bites.
   stream sealed with the old IV still passes the MD5 (over stored bytes) but decodes to
   garbage, and the updater then overwrites the DSP boot stub. Always re-encrypt after
   touching the header (`dsp_reseal.py --region0-version` does). [VM case D]
+
+- **ISA identification by opcode signatures can give false negatives** [FW]: the IC-705
+  main-DSP stream is bit-reversed per byte and packs 48-bit SHARC instructions 2-per-3
+  32-bit words. Five architectures tested "negative" (SHARC included) until the part number
+  came from the service manual and the packing was worked out. Check bit order, word size
+  and packing before trusting a negative.

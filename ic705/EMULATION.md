@@ -249,17 +249,16 @@ UI language is Japanese (factory default: the settings EEPROM is blank).
     high (DSP up) [FW]. In the VM the stream stops after 4 bytes because `rspi_gen.c` has
     no TX-empty interrupt yet [VM].
   - Region-1 stream layout: 0x600 bytes = 256 × 48-bit instructions (zero padded at the
-    end; all-zero words at the start = NOP), then three-word block headers. First read as an ADI SHARC boot stream, but **checked and not confirmed**: no SHARC
-    signature opcodes (RTS 0x0A3E00000000, absolute JUMP/CALL 0x063E…) under any byte order
-    or alignment of the 0x600-byte kernel; DSP563xx (IDA `dsp56k`) decoding of the same bytes
-    is also implausible, and it is not C55x either (RET 0x4804 density 0.27/KB vs ≈6/KB in the
-    DV DSP image). Core **unknown** [INF]; a chip marking or a statistical ISA classifier
-    (cpu_rec) would settle it.
-    - **Not Blackfin either [FW]:** RTS-like `10 00` halfwords are frequent (302 vs 2 random)
-      but the instructions Blackfin compilers emit everywhere are absent: immediate loads
-      (0xE1xx) 2.0/k, long CALL (0xE3xx) 0.8/k and `[--SP] = RETS` (0x017F) 0, all at or
-      below random-data rates. The `10 00` count is therefore data. Code granularity is
-      16-bit (offset 0/2 vs 1/3 statistics); ISA still unknown.
+    end; all-zero words at the start = NOP), then three-word block headers. **The main DSP is an ADSP-21478 SHARC** [EXT: service manual,
+    IC202]. The earlier signature tests (SHARC, DSP563xx, C55x, Nios II, Blackfin) were all
+    negative because of the stream encoding, now solved [FW]: every byte of region 1 is
+    stored **bit-reversed** (LSB-first, like the FPGA region); the bytes form 32-bit
+    little-endian words from flash 0x40008; each group of three words (a, b, c) holds two
+    48-bit instructions, `(b & 0xFFFF) << 32 | a` and `c << 16 | b >> 16`. Decoded that way
+    the 0x600-byte kernel is SHARC code: runs of `0x0Fxx` "Ureg = imm32" loads, 36
+    jump/call-class words and RTS (0x0A3E00000000) ×2, versus 0 under every other layout.
+    The first word is 0xA5. Lesson: a negative ISA signature test means little until the
+    container encoding (bit order, word size, packing) is known.
 - **Input:** touch/keys path not identified yet (not on I2C: RIIC0=EEPROM 0x53,
   RIIC1=0x6B/0x35; most likely via the sub-CPU status frame).
 - No audio, no RF; Wi-Fi/BT/GPS absent.
