@@ -352,3 +352,29 @@ bit 32; 0x1901 = 25c) or from the `0111111` marker in bits 22:16 that replaces C
 32-bit b-forms. The first 4,000 parcels of the INIT_L16 program decode with no unknown
 words and read as compiled C (register saves through `DM(I7,M7)`, frames via I6/I7,
 `JUMP (M14,I12) (DB)` returns) [FW].
+
+### SHARC simulator (`tools/sharc_sim.py`) [VM]
+
+Own SHARC core: 48-bit ISA + VISA execution, fixed/float ALU, multiplier with MRF/MRB,
+shifter, multifunction, DAGs with circular buffers and bit-reverse, delayed branches (two
+slots), PC/loop/status stacks, DO UNTIL, interrupts through the vector table at 0x8C000
+(4 instructions per vector), alternate register sets (MODE1 SRRF/SRD swaps), and SIMD
+(PEy replay: S registers, ASTATY, next-word memory access). Memory is one store of 16-bit
+parcels with the 2147x LW/48-bit/NW/SW windows; IOP registers below 0x40000 are pluggable.
+The image is loaded straight from the parsed loader blocks (no boot-kernel emulation) and
+starts at the reset vector 0x8C004.
+
+Status: the real firmware runs >1,000,000 instructions: ADI C-runtime start (DAG/stack
+setup for both register sets, C stack 0xE2000..0xE3FFE), data init, SIMD enable, peripheral
+setup (IOP 0x1000.. SPI, 0x1084, 0x1C00.., 0x2000/0x2001, 0x4400.., SYSCTL 0x30024), then a
+timed busy-wait (count to 0x5DC0).
+
+Conventions learned from the code [FW]:
+- VISA calls: `CJUMP f (DB); DM(I7,M7) = R2; DM(I7,M7) = <last parcel of the call
+  sequence>`; returns `I12 = DM(M7,I6); JUMP (M14,I12) (DB); RFRAME` with M14 = 1.
+- The PC universal register reads the address of the executing instruction; delayed
+  branches execute two slot instructions.
+- Type 15b (VISA 32-bit `Ureg <-> DM(data7, Ix)`): UREG is bits 29..23 and DATA bits 22..16
+  (verified against prologue/epilogue save/restore pairs; the manual's text layout is
+  ambiguous).
+- S registers (PEy file) are used as ordinary Uregs even outside SIMD.

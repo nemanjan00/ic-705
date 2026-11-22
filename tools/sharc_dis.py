@@ -418,7 +418,7 @@ def decode_visa(w, pc=0):
                     i, m = i + 8, m + 8
                 return 2, '16b', f'{mem}(I{i},M{m}) = {sx(bits(w, 31, 16), 16):#x}'
             i, d, l, g = bits(w, 43, 41), bits(w, 40, 40), bits(w, 39, 39), bits(w, 38, 38)
-            ur, data = ureg(bits(w, 33, 27)), sx(bits(w, 26, 20), 7)
+            ur, data = ureg(bits(w, 29, 23)), sx(bits(w, 22, 16), 7)
             mem = 'PM' if g else 'DM'
             if g:
                 i += 8
