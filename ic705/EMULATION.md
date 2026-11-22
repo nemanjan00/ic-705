@@ -345,3 +345,10 @@ from the kernel word 0x023E7800FF22 = `R2 = LSHIFT R2 BY -1`, used to halve a co
 Next: the SHARC core simulator (compute unit, DAGs, sequencer with delayed branches and
 loop stack, interrupts), the SPI-slave boot path and IOP registers, then the second-stage
 program load.
+
+VISA decoding (`sharc_dis.decode_visa` / `visa_stream`): instruction length comes from the
+first parcel (1100 = 2c; 1001 + bits 36:34 = 16a/16b/15b/3c; bit 39 for 2b/17b/11c; 21c/22c
+bit 32; 0x1901 = 25c) or from the `0111111` marker in bits 22:16 that replaces COMPUTE in the
+32-bit b-forms. The first 4,000 parcels of the INIT_L16 program decode with no unknown
+words and read as compiled C (register saves through `DM(I7,M7)`, frames via I6/I7,
+`JUMP (M14,I12) (DB)` returns) [FW].

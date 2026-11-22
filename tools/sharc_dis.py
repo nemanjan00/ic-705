@@ -352,6 +352,98 @@ def decode(w, pc=0):
     return '?', f'.word48 {w:012x}'
 
 
+# ------------------------------------------------------------------ VISA (16/32/48-bit)
+SHORT_OPS = ['R{n} = R{n} + R{x}', 'R{n} = R{n} - R{x}', 'R{n} = PASS R{x}', 'COMP(R{n}, R{x})',
+             'R{n} = NOT R{x}', 'R{n} = R{x} + 1', 'R{n} = R{x} - 1', 'R{n} = R{n} * R{x} (SSI)',
+             'F{n} = F{n} + F{x}', 'F{n} = F{n} - F{x}', 'F{n} = FLOAT R{x}', 'COMP(F{n}, F{x})',
+             'R{n} = R{n} AND R{x}', 'R{n} = R{n} OR R{x}', 'R{n} = R{n} XOR R{x}',
+             'F{n} = F{n} * F{x}']
+
+
+def visa_length(w):
+    """Length in 16-bit parcels of the VISA instruction whose first 48 bits are w."""
+    p0 = w >> 32
+    top4, top8 = p0 >> 12, p0 >> 8
+    if top4 == 0b1100:                                    # type 2c short compute
+        return 1
+    if top4 == 0b1001:                                    # 16a / 16b / 15b / 3c
+        sel = bits(w, 36, 34)
+        return 3 if sel == 0 else 2 if sel in (1, 2) else 1
+    if top8 in (0x0A, 0x0B) and bits(w, 39, 39):          # type 11c RTS/RTI
+        return 1
+    if top8 == 0x00 and bits(w, 32, 32):                  # type 21c NOP / 22c IDLE
+        return 1
+    if p0 == 0x1901:                                      # type 25c RFRAME
+        return 1
+    if top8 in (0x01, 0x0F) and bits(w, 39, 39):          # type 2b / 17b
+        return 2
+    if bits(w, 22, 16) == 0b0111111 and (w >> 45 in (0b001, 0b010, 0b011) or
+                                         top8 in (0x04, 0x08, 0x09)):
+        return 2                                          # 1b/3b/4b/5b/7b/9b
+    return 3
+
+
+def decode_visa(w, pc=0):
+    """Decode the instruction at the top of w (48 bits); return (length, type, text)."""
+    n = visa_length(w)
+    p0 = w >> 32
+    if n == 1:
+        if p0 >> 12 == 0b1100:
+            op, rn, rx = bits(w, 43, 40), bits(w, 39, 36), bits(w, 35, 32)
+            return 1, '2c', SHORT_OPS[op].format(n=rn, x=rx)
+        if p0 >> 12 == 0b1001:
+            dmi, dmm, d, dreg = bits(w, 43, 41), bits(w, 40, 38), bits(w, 37, 37), bits(w, 35, 32)
+            a = f'DM(I{dmi},M{dmm})'
+            return 1, '3c', f'{a} = R{dreg}' if d else f'R{dreg} = {a}'
+        if p0 >> 8 in (0x0A, 0x0B):
+            op = 'RTS' if p0 >> 8 == 0x0A else 'RTI'
+            c = COND[bits(w, 37, 33)]
+            s = op + (' (DB)' if bits(w, 38, 38) else '')
+            return 1, '11c', s if c == 'TRUE' else f'IF {c} {s}'
+        if p0 == 0x1901:
+            return 1, '25c', 'RFRAME'
+        return 1, '21c', 'IDLE' if bits(w, 39, 39) else 'EMUIDLE' if bits(w, 38, 38) else 'NOP'
+    if n == 2:
+        top8 = p0 >> 8
+        if top8 == 0x01:                                  # 2b: compute at bits 38..16
+            return 2, '2b', compute_text(bits(w, 38, 16)) or 'NOP'
+        if top8 == 0x0F:                                  # 17b: ureg = data16
+            return 2, '17b', f'{ureg(bits(w, 38, 32))} = {sx(bits(w, 31, 16), 16):#x}'
+        if p0 >> 12 == 0b1001:
+            sel = bits(w, 36, 34)
+            if sel == 1:                                  # 16b: imm16 -> mem
+                i, m, g = bits(w, 43, 41), bits(w, 40, 38), bits(w, 37, 37)
+                mem = 'PM' if g else 'DM'
+                if g:
+                    i, m = i + 8, m + 8
+                return 2, '16b', f'{mem}(I{i},M{m}) = {sx(bits(w, 31, 16), 16):#x}'
+            i, d, l, g = bits(w, 43, 41), bits(w, 40, 40), bits(w, 39, 39), bits(w, 38, 38)
+            ur, data = ureg(bits(w, 33, 27)), sx(bits(w, 26, 20), 7)
+            mem = 'PM' if g else 'DM'
+            if g:
+                i += 8
+            a = f'{mem}({data},I{i})'
+            return 2, '15b', (f'{a} = {ur}' if d else f'{ur} = {a}') + (' (LW)' if l else '')
+        t, s = decode(w & ~0x7FFFFF, pc)                 # b-forms: no compute field
+        return 2, t[:-1] + 'b', s
+    t, s = decode(w, pc)
+    return 3, t, s
+
+
+def visa_stream(parcels, base):
+    """Disassemble a list of 16-bit parcels starting at short-word address base."""
+    out = []
+    i = 0
+    while i < len(parcels):
+        w = 0
+        for k in range(3):
+            w = (w << 16) | (parcels[i + k] if i + k < len(parcels) else 0)
+        n, t, s = decode_visa(w, base + i)
+        out.append((base + i, n, w >> (16 * (3 - n)), t, s))
+        i += n
+    return out
+
+
 def text(w, pc=0):
     return decode(w, pc)[1]
 
