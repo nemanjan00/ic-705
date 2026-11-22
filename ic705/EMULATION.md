@@ -154,16 +154,24 @@ UI language is Japanese (factory default: the settings EEPROM is blank).
 
 - ~~Boot hook~~: solved, see the power-on sequence above (`--force-on` is kept in
   `qemu705.py` for runs without the sub-CPU firmware).
-- **Main DSP and DV DSP not emulated:** the main DSP looks like a TI C55x (the region-0
-  "DSP-A" boot table writes C5517/C5535-style system registers 0x1C00–0x1C23 and is
-  probably its loader, pulling the program from flash 0x40000; header "30601120", code
-  0x40028–0x633E4; data blob at 0x80000 with an offset/length table) [INF]. Needs a
-  full C55x core + McBSP/I2S/SPI/DMA models; `tools/c55_emu.py` only interprets single
-  functions.
-- **DSP/FPGA are dummies:** the firmware shows 「DSP/FPGAのファームウェアバージョンが
-  異なります」 because the main DSP / DV DSP / FPGA never answer the version handshake on
-  RSPI0 (`0x201FB8E8`, `0x20201F4C`; ready line P3_8; DMA ch5/13). The installed-version
-  block is `0x203E1B30` (13-byte entries, region pointers at `0x202E222C`).
+- **Main DSP and DV DSP not emulated.**
+  - *DV DSP* = TI C55x. The region-0 "DSP-A" boot table is **its** second-stage loader (C55x
+    code driving the C55x SPI controller at I/O 0x3000–0x300A with SPI-flash READ/WREN/PP/
+    RDSR; checks a tag at flash 0x3FFFC, then loads the DSP-B image and jumps through
+    word 0x100) [FW].
+  - *Main DSP* is **booted by the ARM** (`0x2011D3E0`, called from full bring-up
+    `0x2007B168`): an FPGA/SPI command `0x02000000|(n<<4)` (`0x20119520`, n=1), then RSPI4
+    READ (`03`) at flash **0x40008**, then the RSPI4 TX-empty ISR `0x2011D378` keeps
+    clocking 32-bit dummy words while **P7_6** is high, at most 0x40000 bytes, so the flash
+    streams region 1 straight into the DSP. Then n=2, and the ARM waits for **P7_7** to go
+    high (DSP up) [FW]. In the VM the stream stops after 4 bytes because `rspi_gen.c` has
+    no TX-empty interrupt yet [VM].
+  - Region-1 stream layout: 0x600 bytes = 256 × 48-bit instructions (zero padded at the
+    end; all-zero words at the start = NOP), then three-word block headers. This is the
+    shape of an **Analog Devices SHARC** SPI-slave boot stream (boot kernel + tagged
+    blocks); 12-byte periodicity = two 48-bit instructions per three 32-bit words [INF,
+    strong]. No SHARC CPU model exists in QEMU/IDA here, so running it needs a new SHARC
+    core (large job).
 - **Input:** touch/keys path not identified yet (not on I2C: RIIC0=EEPROM 0x53,
   RIIC1=0x6B/0x35; most likely via the sub-CPU status frame).
 - No audio, no RF; Wi-Fi/BT/GPS absent.
