@@ -149,12 +149,17 @@ and takes encoder counts from QOM `/machine/mtu2` `dial` (signed int).
 `0x8003BD4`, 10-bit, split 3+7 bits). Any level on **ch4** keeps the ARM out of deep standby
 (charge/external-DC behaviour) → model default 0; ch5–9 mid-scale are harmless.
 
-**Settings EEPROM [FW]/[VM]:** RIIC0, device addresses 0x50..0x53, two word-address bytes →
-256 KiB 24M02-class part (A17:A16 in the device address); primary/backup copies in banks 1
-and 3; layout tag "SX4075 V4.51-E00" at 0x3FE40 (image builder `0x20065420`). Modelled in
-`m24m02.c`, persisted to `RZA1H_IC705_EEPROM`. Open: the firmware clears the tag and rewrites
-~20 KB on every power-on before reading it, so it currently re-initialises each boot
-(defaults → Japanese UI) [VM].
+**Settings EEPROM [FW]/[VM]:** RIIC0 pins, device addresses 0x50..0x53, two word-address
+bytes → 256 KiB 24M02-class part (A17:A16 in the device address); 64-byte records, bit 6 of
+the record number selects the primary/backup copy (`0x2005C32C`). **Writes go through the
+RIIC0 peripheral, reads are bit-banged on the same pins** (`0x2005E3D8` → `0x2005E2DC`):
+SCL = P1_0 via PSR1, SDA = P1_1 open-drain via PMSR1 (input = released, output = low),
+read back on PPR1 bit 1; device byte 0xA1 | A17<<2 | A16<<1 (`0x2005D690`). Both paths are
+modelled on one image (`m24m02.c` + the bit-bang slave in `rz_a1h.c`, with a PM/PMSR hook
+added to `gpio.c`), persisted to `RZA1H_IC705_EEPROM`. Before the bit-bang slave existed every
+read failed, so the firmware rewrote its defaults on each power-on. Now a cold start reads
+~104 KB and writes nothing, and settings survive: System Language set to English through the
+touch UI (SET > Display > System Language) is still English after a fresh QEMU start [VM].
 
 **Other buses / devices identified [FW]:**
 - RSPI3 = FPGA register port (`0x20118E00` commands; `0x2011913C` read state machine). FPGA

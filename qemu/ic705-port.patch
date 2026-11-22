@@ -369,25 +369,34 @@ index 0000000..9dfd6d9
 +
 +type_init(dh_register)
 diff --git a/qemu-machine/src/gpio.c b/qemu-machine/src/gpio.c
-index 908927a..80d6054 100644
+index 908927a..24bf209 100644
 --- a/qemu-machine/src/gpio.c
 +++ b/qemu-machine/src/gpio.c
-@@ -364,6 +364,8 @@ static void rza1h_gpio_write(void *opaque, hwaddr offset, uint64_t value,
+@@ -364,6 +364,9 @@ static void rza1h_gpio_write(void *opaque, hwaddr offset, uint64_t value,
                      (uint32_t)value, s->p[2]);
      }
  
 +    uint16_t p_before = s->p[port];
++    uint16_t pm_before = s->pm[port];
 +
      switch (group) {
      case G_P:
          s->p[port] = value & 0xffff;
-@@ -413,6 +415,26 @@ static void rza1h_gpio_write(void *opaque, hwaddr offset, uint64_t value,
+@@ -413,6 +416,34 @@ static void rza1h_gpio_write(void *opaque, hwaddr offset, uint64_t value,
      if (port == 2) {
          gpio_p2_update(s);
      }
 +    /* IC-705 port: sub-CPU handshake. The ARM drives P7_11 low to request a transfer and
 +     * waits for P7_9 to follow (0x20120960); P7_9 high = sub-CPU idle/ready. Model the
 +     * sub-CPU's P7_9 as following the request latch once it has been driven. */
++    if (rza1h_board_ic705() && rza1h_gpio_pm_hook && pm_before != s->pm[port]) {
++        uint16_t ch = pm_before ^ s->pm[port];
++        for (int b = 0; b < 16; b++) {
++            if (ch & (1u << b)) {
++                rza1h_gpio_pm_hook(port, b, (s->pm[port] >> b) & 1);
++            }
++        }
++    }
 +    if (rza1h_board_ic705() && rza1h_gpio_out_hook &&
 +        (group == G_P || group == G_PSR || group == G_PNOT)) {
 +        uint16_t ch = p_before ^ s->p[port];
@@ -408,7 +417,7 @@ index 908927a..80d6054 100644
  }
  
  static const MemoryRegionOps rza1h_gpio_ops = {
-@@ -423,6 +445,8 @@ static const MemoryRegionOps rza1h_gpio_ops = {
+@@ -423,6 +454,8 @@ static const MemoryRegionOps rza1h_gpio_ops = {
      .endianness = DEVICE_LITTLE_ENDIAN,
  };
  
@@ -417,7 +426,7 @@ index 908927a..80d6054 100644
  static void rza1h_gpio_reset(DeviceState *dev)
  {
      RZA1HGpioState *s = RZA1H_GPIO(dev);
-@@ -477,12 +501,77 @@ static void rza1h_gpio_reset(DeviceState *dev)
+@@ -477,12 +510,78 @@ static void rza1h_gpio_reset(DeviceState *dev)
       * P8_9/P1_7 above. See rza1h_gpio_set_civ_bus_busy() for how to simulate it going busy. */
      s->pin_level[7] |= 0x800;
  
@@ -443,6 +452,7 @@ index 908927a..80d6054 100644
 +void (*rza1h_gpio_pin_hook)(int port, int bit, int level);
 +/* output-latch hook: board wiring from an RZ output pin to another chip */
 +void (*rza1h_gpio_out_hook)(int port, int bit, int level);
++void (*rza1h_gpio_pm_hook)(int port, int bit, int input);
 +
 +static void rza1h_gpio_apply_pins(RZA1HGpioState *s, const char *spec)
 +{
@@ -495,7 +505,7 @@ index 908927a..80d6054 100644
  /* Live PWRK press/release for testing (2026-09-20) -- not a real hardware input this project
   * has any other way to drive, and this project's own PPR write handler correctly ignores guest
   * writes (PPR is real-hardware read-only), so a host-side QOM property is the only way to
-@@ -579,6 +668,7 @@ static void rza1h_gpio_init(Object *obj)
+@@ -579,6 +678,7 @@ static void rza1h_gpio_init(Object *obj)
                               rza1h_gpio_set_pwrk_pressed);
      object_property_add_bool(obj, "civ-bus-busy", rza1h_gpio_get_civ_bus_busy,
                               rza1h_gpio_set_civ_bus_busy);
@@ -505,10 +515,10 @@ index 908927a..80d6054 100644
  static void rza1h_gpio_class_init(ObjectClass *oc, const void *data)
 diff --git a/qemu-machine/src/m24m02.c b/qemu-machine/src/m24m02.c
 new file mode 100644
-index 0000000..cd2335b
+index 0000000..1e3e197
 --- /dev/null
 +++ b/qemu-machine/src/m24m02.c
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,171 @@
 +/*
 + * 256 KiB I2C serial EEPROM (24M02 class), written for the IC-705 port.
 + *
@@ -666,6 +676,19 @@ index 0000000..cd2335b
 +        i2c_slave_realize_and_unref(d, bus, &error_fatal);
 +    }
 +    ee_image();
++}
++
++/* Byte access for the bit-banged I2C path in rz_a1h.c (same image as the RIIC slaves). */
++uint8_t rza1h_m24m02_read(uint32_t addr)
++{
++    return ee_image()->mem[addr % EE_SIZE];
++}
++
++void rza1h_m24m02_write(uint32_t addr, uint8_t v)
++{
++    M24M02Image *im = ee_image();
++    im->mem[addr % EE_SIZE] = v;
++    timer_mod(im->flush, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + NANOSECONDS_PER_SECOND);
 +}
 diff --git a/qemu-machine/src/mtu2g.c b/qemu-machine/src/mtu2g.c
 new file mode 100644
@@ -1353,7 +1376,7 @@ index 0000000..7304927
 +
 +type_init(rg_register)
 diff --git a/qemu-machine/src/rz_a1h.c b/qemu-machine/src/rz_a1h.c
-index 2342e9e..9278f73 100644
+index 2342e9e..ad5e716 100644
 --- a/qemu-machine/src/rz_a1h.c
 +++ b/qemu-machine/src/rz_a1h.c
 @@ -27,6 +27,8 @@
@@ -1376,7 +1399,7 @@ index 2342e9e..9278f73 100644
  
  /* Every I/O region notes/memory-map.md documents, mirroring
   * emu/board.py's IO_REGIONS list exactly (same names, same comments on
-@@ -96,12 +102,291 @@ static void add_plain_ram_region(MemoryRegion *sysmem, const char *name,
+@@ -96,12 +102,436 @@ static void add_plain_ram_region(MemoryRegion *sysmem, const char *name,
      memory_region_add_subregion_overlap(sysmem, base, mr, 0);
  }
  
@@ -1521,6 +1544,142 @@ index 2342e9e..9278f73 100644
 +    return ic705_tsc.down ? g_strdup_printf("%u,%u", ic705_tsc.x, ic705_tsc.y) : g_strdup("");
 +}
 +
++/* IC-705 settings EEPROM, bit-banged read path [FW 0x2005E3D8 -> 0x2005E2DC]: the firmware
++ * writes through RIIC0 but reads by bit-banging I2C on the same pins: SCL = P1_0 (PSR1),
++ * SDA = P1_1 open-drain (PMSR1: input = released, output = low), read back on PPR1 bit 1.
++ * Device byte 0xA0 | A17<<2 | A16<<1 | R/W, two word-address bytes, as on the RIIC path
++ * (shared image, m24m02.c). */
++static struct {
++    bool scl_lat, scl_in, sda_lat, sda_in;   /* P1 latch bits / PM1 input bits */
++    bool scl, sda_m, slave;                 /* current SCL, master SDA, slave SDA drive */
++    enum { EE_IDLE, EE_ADDR, EE_AH, EE_AL, EE_WR, EE_RD, EE_WAIT } st;
++    int bit;
++    uint8_t sh;
++    uint32_t addr;
++    bool ack_phase;     /* slave drives ACK this clock */
++    bool mack;          /* master ACK/NACK clock after a data byte we sent */
++} ic705_ee = { .scl_in = true, .sda_in = true, .scl = true, .sda_m = true, .slave = true };
++
++static void ic705_ee_drive(void)
++{
++    rza1h_gpio_set_input(ic705_gpio, 1, 1, ic705_ee.sda_m && ic705_ee.slave);
++    rza1h_gpio_set_input(ic705_gpio, 1, 0, ic705_ee.scl);
++}
++
++static void ic705_ee_rd_load(void)
++{
++    rza1h_debug("eebb", "rd %05x = %02x", ic705_ee.addr, rza1h_m24m02_read(ic705_ee.addr));
++    ic705_ee.sh = rza1h_m24m02_read(ic705_ee.addr);
++    ic705_ee.addr = (ic705_ee.addr + 1) & 0x3FFFF;
++    ic705_ee.bit = 0;
++}
++
++static void ic705_ee_update(void)
++{
++    bool scl = ic705_ee.scl_in ? true : ic705_ee.scl_lat;
++    bool sda = ic705_ee.sda_in ? true : ic705_ee.sda_lat;
++    bool pscl = ic705_ee.scl, psda = ic705_ee.sda_m;
++
++    ic705_ee.scl = scl;
++    ic705_ee.sda_m = sda;
++    if (pscl && scl && psda != sda) {
++        if (!sda) {                                 /* START / repeated START */
++            ic705_ee.st = EE_ADDR;
++            ic705_ee.bit = 0;
++            ic705_ee.sh = 0;
++            ic705_ee.ack_phase = false;
++            ic705_ee.mack = false;
++        } else {                                    /* STOP */
++            ic705_ee.st = EE_IDLE;
++        }
++        ic705_ee.slave = true;
++        ic705_ee_drive();
++        return;
++    }
++    if (!pscl && scl) {                             /* SCL rising: sample */
++        if (ic705_ee.st == EE_RD) {
++            if (ic705_ee.mack && sda) {
++                ic705_ee.st = EE_WAIT;              /* master NACK: end of read */
++            }
++        } else if (ic705_ee.st != EE_IDLE && ic705_ee.st != EE_WAIT && !ic705_ee.ack_phase) {
++            ic705_ee.sh = (ic705_ee.sh << 1) | sda;
++            ic705_ee.bit++;
++        }
++    } else if (pscl && !scl) {                      /* SCL falling: drive */
++        if (ic705_ee.st == EE_RD) {
++            if (ic705_ee.ack_phase || ic705_ee.mack) {  /* an ACK clock is over: next byte */
++                ic705_ee.ack_phase = false;
++                ic705_ee.mack = false;
++                ic705_ee_rd_load();
++            }
++            if (ic705_ee.bit < 8) {
++                ic705_ee.slave = (ic705_ee.sh >> (7 - ic705_ee.bit)) & 1;
++                ic705_ee.bit++;
++            } else {
++                ic705_ee.slave = true;              /* release for the master's ACK */
++                ic705_ee.mack = true;
++            }
++        } else if (ic705_ee.ack_phase) {            /* our ACK clock over */
++            ic705_ee.ack_phase = false;
++            ic705_ee.slave = true;
++            if (ic705_ee.st == EE_RD) {
++                ic705_ee_rd_load();
++                ic705_ee.slave = (ic705_ee.sh >> 7) & 1;
++                ic705_ee.bit = 1;
++            }
++        } else if (ic705_ee.bit == 8 && ic705_ee.st != EE_IDLE && ic705_ee.st != EE_WAIT) {
++            uint8_t b = ic705_ee.sh;
++            bool ack = true;
++            rza1h_debug("eebb", "st %d byte %02x addr %05x", ic705_ee.st, b, ic705_ee.addr);
++            ic705_ee.bit = 0;
++            ic705_ee.sh = 0;
++            switch (ic705_ee.st) {
++            case EE_ADDR:
++                if ((b & 0xF0) != 0xA0) {
++                    ack = false;
++                    ic705_ee.st = EE_WAIT;
++                    break;
++                }
++                ic705_ee.addr = (((b >> 1) & 3) << 16) | (ic705_ee.addr & 0xFFFF);
++                ic705_ee.st = (b & 1) ? EE_RD : EE_AH;
++                break;
++            case EE_AH:
++                ic705_ee.addr = (ic705_ee.addr & 0x30000) | (b << 8);
++                ic705_ee.st = EE_AL;
++                break;
++            case EE_AL:
++                ic705_ee.addr |= b;
++                ic705_ee.st = EE_WR;
++                break;
++            case EE_WR:
++                rza1h_m24m02_write(ic705_ee.addr, b);
++                ic705_ee.addr = (ic705_ee.addr & ~0xFFu) | ((ic705_ee.addr + 1) & 0xFF);
++                break;
++            default:
++                break;
++            }
++            ic705_ee.slave = !ack;
++            ic705_ee.ack_phase = ack;
++            if (ack && ic705_ee.st == EE_RD) {
++                /* ACK of a read address: first data bit goes out after this ACK clock */
++            }
++        }
++    }
++    ic705_ee_drive();
++}
++
++static void ic705_pm_hook(int port, int bit, int input)
++{
++    if (port == 1 && bit <= 1) {
++        if (bit == 0) {
++            ic705_ee.scl_in = input;
++        } else {
++            ic705_ee.sda_in = input;
++        }
++        ic705_ee_update();
++    }
++}
++
 +/* IC-705 window input (GTK console): mouse = touch panel, wheel/arrows = main dial, keys =
 + * front-panel ladder keys through the sub-CPU ADC (held while held), P = POWER.
 + * Pixel -> raw panel value uses the firmware's default calibration, measured in the VM:
@@ -1612,6 +1771,15 @@ index 2342e9e..9278f73 100644
 +        ic705_tsc_pin(bit, level);
 +        return;
 +    }
++    if (port == 1 && bit <= 1) {
++        if (bit == 0) {
++            ic705_ee.scl_lat = level;
++        } else {
++            ic705_ee.sda_lat = level;
++        }
++        ic705_ee_update();
++        return;
++    }
 +    if (!ic705_sub) {
 +        if (port == 7 && bit == 11) {              /* behavioural sub: ack follows request */
 +            rza1h_gpio_set_input(ic705_gpio, 7, 9, level);
@@ -1668,7 +1836,7 @@ index 2342e9e..9278f73 100644
      /* Real hardware's boot-mode-3 SPI-flash XIP entry point -- confirmed
       * ground truth, see notes/base-loader.md and RZA1H_FLASH_BASE's own
       * comment in rz_a1h.h. */
-@@ -125,6 +410,7 @@ static void rza1h_init(MachineState *machine)
+@@ -125,6 +555,7 @@ static void rza1h_init(MachineState *machine)
      DeviceState *openvg;
      DeviceState *adc;
      DeviceState *vdc5;
@@ -1676,7 +1844,7 @@ index 2342e9e..9278f73 100644
      size_t i;
      int ch;
  
-@@ -331,6 +617,23 @@ static void rza1h_init(MachineState *machine)
+@@ -331,6 +762,23 @@ static void rza1h_init(MachineState *machine)
       * ring has drained, so its "ring now empty" flag-clear (main_idle_
       * loop's own entry-wait gate, 0x203906ed) never runs even once the
       * ring genuinely is empty. See mtu2.c's own comment. */
@@ -1700,7 +1868,7 @@ index 2342e9e..9278f73 100644
      mtu2 = qdev_new(TYPE_RZA1H_MTU2);
      sysbus_realize_and_unref(SYS_BUS_DEVICE(mtu2), &error_fatal);
      sysbus_mmio_map_overlap(SYS_BUS_DEVICE(mtu2), 0, RZA1H_MTU2_BASE, 0);
-@@ -352,6 +655,7 @@ static void rza1h_init(MachineState *machine)
+@@ -352,6 +800,7 @@ static void rza1h_init(MachineState *machine)
      sysbus_connect_irq(SYS_BUS_DEVICE(mtu2), 5,
                         qdev_get_gpio_in(gic,
                             RZA1H_MTU2_TGI1A_IRQ - RZA1H_GIC_NUM_INTERNAL));
@@ -1708,7 +1876,7 @@ index 2342e9e..9278f73 100644
  
      /* riic.c -- upgraded from a bare RAM region to a real device,
       * 2026-09-08 second pass, once body.bin's own cold-boot RIIC2 read
-@@ -394,6 +698,9 @@ static void rza1h_init(MachineState *machine)
+@@ -394,6 +843,9 @@ static void rza1h_init(MachineState *machine)
          sysbus_realize_and_unref(SYS_BUS_DEVICE(scif), &error_fatal);
          sysbus_mmio_map_overlap(SYS_BUS_DEVICE(scif), 0,
                                  RZA1H_SCIF0_BASE + i * RZA1H_SCIF_STRIDE, 0);
@@ -1718,7 +1886,7 @@ index 2342e9e..9278f73 100644
          sysbus_connect_irq(SYS_BUS_DEVICE(scif), 0,
                             qdev_get_gpio_in(gic,
                                 RZA1H_SCIF_TXI_BASE0 + i * RZA1H_SCIF_TXI_STRIDE
-@@ -407,7 +714,7 @@ static void rza1h_init(MachineState *machine)
+@@ -407,7 +859,7 @@ static void rza1h_init(MachineState *machine)
           * channel leaves it created but unmapped, a normal, inert QEMU
           * idiom (rza1h_scif_init's own comment explains why it can't be
           * skipped at creation time instead). */
@@ -1727,7 +1895,7 @@ index 2342e9e..9278f73 100644
              sysbus_mmio_map_overlap(SYS_BUS_DEVICE(scif), 1,
                                      RZA1H_SCIF5_DSP_RETRY_ARM_BASE, 0);
          }
-@@ -437,6 +744,17 @@ static void rza1h_init(MachineState *machine)
+@@ -437,6 +889,17 @@ static void rza1h_init(MachineState *machine)
                                                   RZA1H_GIC_NUM_INTERNAL));
      }
  
@@ -1745,7 +1913,7 @@ index 2342e9e..9278f73 100644
      /* sdhi.c -- the SD slot body.bin actually drives (not MMCIF, see sdhi.c).
       * The card is upstream's sd-card, backed by `-drive if=sd`; without one
       * the slot is empty. Overlap-mapped inside "io-e8030000". */
-@@ -468,6 +786,19 @@ static void rza1h_init(MachineState *machine)
+@@ -468,6 +931,19 @@ static void rza1h_init(MachineState *machine)
       * comment). Overlap-mapped: sits inside the broader "io-e8000000"
       * unimplemented-device catch-all above. SPRI2 wired 2026-09-24 for the
       * fake FPGA's sweep reads, see rspi2.c's own comment. */
@@ -1765,7 +1933,7 @@ index 2342e9e..9278f73 100644
      rspi2 = qdev_new(TYPE_RZA1H_RSPI2);
      sysbus_realize_and_unref(SYS_BUS_DEVICE(rspi2), &error_fatal);
      sysbus_mmio_map_overlap(SYS_BUS_DEVICE(rspi2), 0, RZA1H_RSPI2_BASE, 0);
-@@ -475,6 +806,7 @@ static void rza1h_init(MachineState *machine)
+@@ -475,6 +951,7 @@ static void rza1h_init(MachineState *machine)
                         qdev_get_gpio_in(gic, RZA1H_RSPI2_SPRI_IRQ -
                                               RZA1H_GIC_NUM_INTERNAL));
  
@@ -1773,7 +1941,7 @@ index 2342e9e..9278f73 100644
      /* ssif.c -- SSIF0/1, the CPU end of the DSP audio link (2026-09-24, see ssif.c).
       * Overlap-mapped inside "io-e8200000"; no IRQs (the firmware polls DMAC CHSTAT). */
      {
-@@ -514,15 +846,47 @@ static void rza1h_init(MachineState *machine)
+@@ -514,15 +991,48 @@ static void rza1h_init(MachineState *machine)
      sysbus_realize_and_unref(SYS_BUS_DEVICE(adc), &error_fatal);
      sysbus_mmio_map_overlap(SYS_BUS_DEVICE(adc), 0, RZA1H_ADC_BASE, 1);
  
@@ -1781,6 +1949,7 @@ index 2342e9e..9278f73 100644
 +        ic705_gpio = gpio;
 +        rza1h_gpio_out_hook = ic705_out_hook;
 +        rza1h_gpio_set_input(gpio, 3, 12, 1);              /* no touch */
++        rza1h_gpio_pm_hook = ic705_pm_hook;
 +        object_property_add_str(OBJECT(machine), "touch", ic705_get_touch, ic705_set_touch);
 +        qemu_input_handler_activate(qemu_input_handler_register(gpio, &ic705_input_handler));
 +    }
@@ -1824,7 +1993,7 @@ index 2342e9e..9278f73 100644
      mc->default_ram_size = RZA1H_RAM_SIZE;
      mc->default_ram_id = "rza1h.ram";
 diff --git a/qemu-machine/src/rz_a1h.h b/qemu-machine/src/rz_a1h.h
-index 9aac7c4..3c9cd9e 100644
+index 9aac7c4..ed9c06f 100644
 --- a/qemu-machine/src/rz_a1h.h
 +++ b/qemu-machine/src/rz_a1h.h
 @@ -134,6 +134,16 @@
@@ -1844,13 +2013,17 @@ index 9aac7c4..3c9cd9e 100644
  
  /* riic.c -- matches emu/peripherals/riic.py's per-instance base addresses
   * (RIIC0-2, stride 0x400). RIIC2 is the diode-matrix EEPROM's controller,
-@@ -272,4 +282,8 @@
+@@ -272,4 +282,12 @@
  #define RZA1H_ADC_SIZE 0x00000100
  #define TYPE_RZA1H_ADC "rza1h-adc"
  
 +/* m24m02.c: IC-705 settings EEPROM (0x50..0x53) */
 +typedef struct I2CBus I2CBus;
 +void rza1h_m24m02_create(I2CBus *bus);
++uint8_t rza1h_m24m02_read(uint32_t addr);
++void rza1h_m24m02_write(uint32_t addr, uint8_t v);
++/* gpio.c: IC-705 direction-change hook (PM/PMSR), input = 1 when the pin became an input */
++extern void (*rza1h_gpio_pm_hook)(int port, int bit, int input);
 +
  #endif
 diff --git a/qemu-machine/src/rza1h_debug.h b/qemu-machine/src/rza1h_debug.h
