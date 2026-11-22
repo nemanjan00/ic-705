@@ -278,7 +278,8 @@ def decode(w, pc=0):
         g, isrc, m, idis = bits(w, 38, 38), bits(w, 32, 30), bits(w, 29, 27), bits(w, 26, 24)
         if g:
             isrc, m = isrc + 8, m + 8
-        mod = f'MODIFY(I{isrc},M{m})'
+        idst = isrc ^ idis                               # destination I = Is XOR IdIs
+        mod = f'MODIFY(I{isrc},M{m})' if idst == isrc else f'I{idst} = MODIFY(I{isrc},M{m})'
         return '7a', iff(', '.join(x for x in (ct, mod) if x))
     if sub in (0b00110, 0b00111):                        # type 8: direct/relative branch
         b, a = bits(w, 39, 39), bits(w, 38, 38)
@@ -332,8 +333,10 @@ def decode(w, pc=0):
         br, g, idis, isrc = bits(w, 39, 39), bits(w, 38, 38), bits(w, 37, 35), bits(w, 34, 32)
         if g:
             isrc += 8
+        idst = isrc ^ idis
         data = sx(bits(w, 31, 0), 32)
-        return '19a', (f'BITREV(I{isrc},{data})' if br else f'MODIFY(I{isrc},{data})')
+        op = f'BITREV(I{isrc},{data})' if br else f'MODIFY(I{isrc},{data})'
+        return '19a', op if idst == isrc else f'I{idst} = {op}'
     if sub == 0b10111:                                   # type 20: push/pop
         f = [n for n, b in (('PUSH LOOP', 39), ('POP LOOP', 38), ('PUSH STS', 37),
                             ('POP STS', 36), ('PUSH PCSTK', 35), ('POP PCSTK', 34),

@@ -84,6 +84,7 @@ class Sharc:
         self.trace = None
         self.tperiod = self.tcount = 0
         self.flags_in = 0
+        self.hle = {}                            # pc -> fast-forward hook
 
     # ------------------------------------------------------------- memory
     def p_get(self, a):
@@ -308,6 +309,16 @@ class Sharc:
         if update:
             self.I[i] = new & M32
         return cur
+
+    def circ(self, i, v):
+        ln = self.Lr[i]
+        if ln:
+            base = self.B[i]
+            if v >= base + ln:
+                v -= ln
+            elif v < base:
+                v += ln
+        return v & M32
 
     # ------------------------------------------------------------- conditions
     def cond(self, c):
@@ -725,6 +736,9 @@ class Sharc:
         self.pc = target
 
     def step(self):
+        h = self.hle.get(self.pc)
+        if h:
+            h(self)
         self.take_irq()
         w, n = self.fetch()
         here = self.pc
@@ -804,9 +818,13 @@ class Sharc:
         return False
 
     def exec(self, w, n, here, nxt):
+        simd = self.sreg['MODE1'] >> 21 & 1 and self.simd_replay(w, n)
+        if simd:
+            i_before = list(self.I)              # PEy addresses come from the pre-update DAGs
         self.exec1(w, n, here, nxt)
-        if self.sreg['MODE1'] >> 21 & 1 and self.simd_replay(w, n):
-            pc, vs, dl = self.pc, self.visa, list(self.delay)
+        if simd:
+            pc, vs, dl, i_after = self.pc, self.visa, list(self.delay), self.I
+            self.I = i_before
             self.pe_swap()
             self.pey = True
             try:
@@ -814,6 +832,7 @@ class Sharc:
             finally:
                 self.pey = False
                 self.pe_swap()
+                self.I = i_after
                 self.pc, self.visa, self.delay = pc, vs, dl
 
     def exec1(self, w, n, here, nxt):
@@ -965,11 +984,13 @@ class Sharc:
         if sub == 0b00100:                                    # type 7
             if not self.cond(cnd):
                 return
-            g, isrc, m = bits(w, 38, 38), bits(w, 32, 30), bits(w, 29, 27)
+            g, isrc, m, idis = bits(w, 38, 38), bits(w, 32, 30), bits(w, 29, 27), bits(w, 26, 24)
             if g:
                 isrc, m = isrc + 8, m + 8
             self.compute(c23)
-            self.dag(isrc, m, True)
+            if not self.pey:                     # Id = Is XOR IdIs receives the modified value
+                v = (self.I[isrc] + s32(self.M[m])) & M32
+                self.I[isrc ^ idis] = self.circ(isrc, v)
             return
         if sub in (0b00110, 0b00111):                         # type 8
             b, j = bits(w, 39, 39), bits(w, 26, 26)
@@ -1049,11 +1070,12 @@ class Sharc:
             if g:
                 isrc += 8
             data = sx(bits(w, 31, 0), 32)
+            idst = isrc ^ idis
+            v = (self.I[isrc] + data) & M32
             if br:
-                v = (self.I[isrc] + data) & M32
-                self.I[isrc] = int(f'{v:032b}'[::-1], 2)
+                self.I[idst] = int(f'{v:032b}'[::-1], 2)
             else:
-                self.I[isrc] = (self.I[isrc] + data) & M32
+                self.I[idst] = self.circ(isrc, v)
             return
         if sub == 0b10111:                                    # type 20
             if bits(w, 39, 39):
@@ -1216,6 +1238,18 @@ class Sharc:
         return self.exec48(w & ~0x7FFFFF, here, nxt)
 
 
+# ------------------------------------------------------------------ fast-forward hooks
+def ff_delay_loop(sim):
+    """0x1275CD: `for (i = 0; i < 0x5DC0; i++);` busy delay on a stack local (DM(I6-2)).
+    Jump the counter to its end value; the loop then exits on its own compare."""
+    a = (sim.I[6] - 2) & M32
+    if s32(sim.rd(a)) < 0x5DC0:
+        sim.wr(a, 0x5DC0)
+
+
+HLE = {0x1275EA: ff_delay_loop}
+
+
 # ------------------------------------------------------------------ loading / main
 def load_image(sim, img):
     ws = L.stream_words(img)
@@ -1256,6 +1290,7 @@ if __name__ == '__main__':
     sim = Sharc()
     load_image(sim, open(a.image, 'rb').read())
     sim.goto(0x8C004)
+    sim.hle.update(HLE)
     if a.trace:
         sim.trace = []
     try:

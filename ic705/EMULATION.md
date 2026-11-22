@@ -378,3 +378,11 @@ Conventions learned from the code [FW]:
   (verified against prologue/epilogue save/restore pairs; the manual's text layout is
   ambiguous).
 - S registers (PEy file) are used as ordinary Uregs even outside SIMD.
+- Enhanced MODIFY (types 7/19): the destination I register is Is XOR IdIs
+  (`I5 = MODIFY(I6,-17)` sets up a frame pointer); modifying Is in place breaks frames.
+- SIMD: PEy's half of a post-modify access uses the I value from before the instruction
+  (address + 1), not the already-incremented one.
+
+Current stop [VM]: after init (busy-wait delays fast-forwarded by a hook at 0x1275EA) the
+firmware polls SPI status `DM(0x1002)` at 0x12CB88, i.e. it is waiting for the host (ARM
+RSPI0) on its SPI slave port; a second SPI block (0x2800..0x2884) is configured as well.
