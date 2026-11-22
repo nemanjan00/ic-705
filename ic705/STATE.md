@@ -4,6 +4,12 @@ Tags: [FW] firmware static · [HW] radio · [VM] emulator · [EXT] outside · [I
 
 ## Now
 
+- **2026-11-22: ICAP audio taps traced [FW]** (`ICAP.md`). Apps get mono 8 kHz:
+  RX is SSIF0-RX left (48 kHz from the main DSP), decimated by a 96-tap FIR; TX replaces
+  the USB MOD source and is interpolated back to 48 kHz. 8 kHz plus the FM audio chain
+  make DMR through the stock ICAP API impractical. Next: trace what the SHARC does to the
+  SSIF0 audio in FM mode, the deciding question for an ICAP-side DMR app.
+
 - **2026-11-22: full radio boots clean with both DSPs [VM].** `tools/run705_gui.py --dsp`:
   ARM + sub-CPU in QEMU, the main DSP (SHARC, `dsp_bridge.py`, RSPI3/P7_6) and the DV DSP
   (C5517, `dv_bridge.py`, RSPI0 McSPI/P3_8) on their own firmware, FPGA dummy. The main
