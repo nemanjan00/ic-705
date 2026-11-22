@@ -9,10 +9,12 @@ what the radio does.
 |---|---|---|
 | ARM function-level (call one firmware function, log MMIO) | **working** | `tools/arm_emu.py` (Unicorn 2.1.4) |
 | ARM updater (DSP flash writer) | **working** | `tools/arm_dsp_update_emu.py`: firmware code with HLE for SD read + SPI-NOR model |
-| ARM full-system (boot RTX, UI, screen) | **boots to the IC-705 UI** (QEMU, IC-705 port of the IC-7300 machine) | `qemu/`, `tools/qemu705.py`, `tools/run705_gui.py`; see "Full-system status" |
-| DV DSP (C55x) | **whole firmware boots to its main loop** in a new core; not yet linked to QEMU | `tools/c55sim.py` (whole-firmware simulator); `tools/c55_emu.py` (single routines, modulator PoC) |
+| ARM full-system (boot RTX, UI, screen) | **boots to the main screen through the real power-on path** (QEMU, IC-705 port of the IC-7300 machine) | `qemu/`, `tools/qemu705.py`, `tools/run705_gui.py`; see "Full-system status" |
 | Sub-CPU (STM32L0, aux2 firmware) | **runs its own firmware** inside the QEMU machine (second CPU cluster) | `qemu/ic705-port.patch` (`stm32l0.c`) |
-| Main DSP, FPGA | out of reach for now | main DSP likely C55x (see below); FPGA stays a dummy by design |
+| Main DSP (ADSP-21478 SHARC) | **runs its own firmware, linked to QEMU on RSPI3** | `tools/sharc_sim.py` + `tools/dsp_bridge.py` |
+| DV DSP (C5517) | **runs its own firmware, linked to QEMU on RSPI0** | `tools/c55sim.py` + `tools/dv_bridge.py`; `tools/c55_emu.py` (single routines, modulator PoC) |
+| FPGA | dummy (owner's choice) | — |
+| Audio (SSIF/SPORT/I2S/codecs) | **no samples flow yet** | — |
 
 ## `tools/arm_emu.py`
 
@@ -36,8 +38,9 @@ calls a function with R0–R3 (+ stack args) and LR pointing at a stop trampolin
 
 Bit rate in clock-sync mode is Pφ / (4 · 2^(2n−1) · (N+1)) = Pφ / 6656; with
 P1φ = 66.67 MHz → **≈ 10 kbit/s** [INF: clock source not confirmed]. The routine also
-sets pin-function registers for ports 4, 5, 6, 7 and 10 (`0xFCFE3x2C`). Whether this
-link is the DV DSP host link is [INF] (see `DV_DSP.md`).
+sets pin-function registers for ports 4, 5, 6, 7 and 10 (`0xFCFE3x2C`). It was once the
+candidate DV DSP link; that link turned out to be RSPI0 ↔ McSPI, and SCIF5 stays silent
+during boot. Its role is open.
 
 ## `tools/c55_emu.py` (DV DSP) [VM]
 
@@ -49,9 +52,9 @@ link is the DV DSP host link is [INF] (see `DV_DSP.md`).
   nearest, history kept per delay-buffer address.
 - IDA's stack-variable notation (`*SP(#16h+var_4)`) is in **bytes**: word offset = /2.
 - `xccpart` is modelled as "condition the next instruction". The firmware uses two
-  encodings (`0x96..`, `0x9E..`) whose placement suggests they differ. With the invert
-  flag at its init value (0), both readings give the same stock output, and the 4FSK
-  patch removes both instructions.
+  encodings: `0x96..` is a prefix and `0x9E..` a postfix that gates the *preceding*
+  instruction (found later with `c55sim.py`). With the invert flag at its init value (0),
+  both readings give the same stock output, and the 4FSK patch removes both instructions.
 - **Positive control:** stock `gmsk_mod_bit` equals an independent GMSK model exactly.
 
 ## `tools/arm_dsp_update_emu.py` [VM]
@@ -63,7 +66,7 @@ SPI-transaction functions (`0x20069F30`, `0x2006A0CC`) are replaced; the latter 
 backed by a 16 MiB SPI-NOR model that enforces WREN before erase/program and AND-
 programs pages. Results are in `POC.md` (cases A–D). One run takes about 1 s.
 
-## Full-system plan (screen + peripherals)
+## Full-system plan (screen + peripherals) — historical
 
 Base: `jeskko/ic7300-homebrew` `qemu-machine/` (MIT), a custom QEMU 11.1.1 machine for the
 same RZ/A1H. It boots stock IC-7300 firmware to the main screen, with GIC, OSTM, MTU2,
@@ -78,20 +81,19 @@ IC-705 port, deltas to make (static evidence in brackets):
 2. **Boot loader:** the IC-705 bootstrap copies a loader to `0x20004000` and unpacks main
    to `0x20005000` (entry `0x20005060`) [EXT sq6emm]. Check that the machine's reset at
    `0x18000000` takes this path unchanged.
-3. **Peripheral differences found so far:**
-   - DV DSP on a clock-synchronous SCIF5 (`SCSMR=0x82`) [VM], not the IC-7300's async DSP
-     UART.
+3. **Peripheral differences found so far** (superseded where noted):
+   - ~~DV DSP on a clock-synchronous SCIF5~~: the DV DSP is on RSPI0 (McSPI), and the main
+     DSP is on RSPI3.
    - DSP/FPGA config flash on **RSPI4** [FW]. The 7300 machine only models RSPI2 (its FPGA).
    - Sub-CPU (`"ICOM4075S"`) on SCIF3 with a `0x55` handshake [FW]; the 7300 front panel
      is also on SCIF3.
    - WLAN CC31xx (SPI, NWP), Bluetooth, GPS: absent, stubs.
    - Display panel size and touch controller: to be read from the VDC5 setup the firmware
      writes.
-4. **Dummies:** FPGA and both DSPs. The user agreed only a dummy FPGA is needed.
+4. **Dummies:** only the FPGA (owner's choice). Both DSPs now run their own firmware.
 
-Status: the QEMU build (`qemu-machine/setup.sh`: clone QEMU v11.1.1, symlink the sources,
-`configure --target-list=arm-softmmu`, ninja) **needs the owner's approval to run**; it
-was blocked by the session's permission policy.
+Build: `qemu-machine/setup.sh` (clone QEMU v11.1.1, symlink the sources,
+`configure --target-list=arm-softmmu`, ninja); see `../qemu/README.md`.
 
 ## Full-system status (2026-11-22) [VM]
 
@@ -113,7 +115,8 @@ The stock IC-705 E 1.40 firmware boots on the patched `rz-a1h` QEMU machine
    `S 1.20-E00`), so the old 「サブCPUが正常に動作していません」 popup is gone.
 6. Main screen after ~90 s wall time (-icount shift=1).
 
-Screen language came out English in this run (Japanese before; not yet explained [INF]).
+Screen language: English, because System Language was set once through the touch UI and
+the settings EEPROM now persists (see below). A blank EEPROM gives the Japanese default.
 
 **Adjust (service) mode trap [FW]:** `0x2007AF48` selects adjust mode (`0x20380707` = 1,
 "ADJUST MODE" window with M/S/DSP(P)/DSP(D)/FPGA/DV DSP versions) when the power-on flag is
@@ -162,10 +165,10 @@ read failed, so the firmware rewrote its defaults on each power-on. Now a cold s
 touch UI (SET > Display > System Language) is still English after a fresh QEMU start [VM].
 
 **Other buses / devices identified [FW]:**
-- RSPI3 = FPGA register port (`0x20118E00` commands; `0x2011913C` read state machine). FPGA
-  status words carry a type nibble (`0x20118FA4`): type 1/9 = level bytes queued per step
-  into `0x204988BC` and smoothed (`0x2011E4D0`, S-meter-like); type 8 = 10-bit value + 2 flags;
-  type F = flag. The FPGA stays a dummy (owner's choice), so these read 0xFF now.
+- RSPI3 = **main-DSP (SHARC) link**, not an FPGA port as first noted (see "ARM <-> main-DSP
+  link" below). The status words it returns carry a type nibble (`0x20118FA4`): type 1/9 =
+  level bytes queued per step into `0x204988BC` and smoothed (`0x2011E4D0`, S-meter-like);
+  type 8 = 10-bit value + 2 flags; type F = version reply.
 - RIIC1 0x6B = battery charger, TI BQ2571x-style (16-bit registers 0x00–0x3A, status/ADC
   0x28/0x2C read back; `0x20019B28`, `0x2001A174`). Modelled as a register file
   (`bq2571x.c`, IDs 0x40/0x88); the firmware writes ChargeOption0 = 0x860F at power-on [VM].
@@ -173,7 +176,8 @@ touch UI (SET > Display > System Language) is still English after a fresh QEMU s
   `0x200E4588` → reads 7 bytes from register 0x10 (`0x200E3B98`).
 - SCIF1 = CI-V `FE…FD` (`0x2010C134`); SCIF2 = shared driver whose pins are switched by
   `0x2011862C` (CI-V on the remote jack with IRQ2, `0x20028FFC`, plus another port);
-  SCIF4 = byte ring of 0x36C (GPS NMEA likely); SCIF5 = DV DSP link; USB0 at 0xE8010000.
+  SCIF4 = byte ring of 0x36C (GPS NMEA likely); SCIF5 = clock-synchronous, silent at boot,
+  role open; RSPI0 = DV DSP link; USB0 at 0xE8010000.
 - P0_5 bit-banged single-wire receiver (`0x20118770`, microphone keys likely).
 - Steady-state MMIO census [VM] (3 s trace on the main screen): ARM ADC ch0/1/4/5/6/7 read
   every tick, ch2/ch3 never (gated by bit 5 of config byte `0x20380BD2`, set per power-source
@@ -238,16 +242,24 @@ UI language is Japanese (factory default: the settings EEPROM is blank).
 | MTU2 | general model (all channels, compare/clear/overflow, IRQs) | TGI4A starts ADC `0x20005C48`; TGRC_4 at +0x228 |
 | ADC | single-conversion ADF, per-channel values | `0x201185AC`; supply class `0x2000B770` (≥0x28B = DC) |
 | DMAC ch8–15 | generic block transfers + DMAINT | ch10 GPIO bit-bang `0x2011EBBC`; ch15 SCIF3 TX |
-| RSPI0–4 | generic SPI master; RSPI4 backed by SPI-NOR (DSP group image); RSPI3 = main-DSP link (socket to `dsp_bridge.py`) | DSP flash `0x2006A218`; DSP link state machine `0x20118E68` |
+| RSPI0–4 | generic SPI master with RX trigger level, TX-empty IRQ and RSPI0 DMA; RSPI4 backed by SPI-NOR (DSP group image); RSPI3 = main-DSP link (socket to `dsp_bridge.py`); RSPI0 = DV DSP link (socket to `dv_bridge.py`) | DSP flash `0x2006A218`; DSP link state machine `0x20118E68`; DV link `0x201FFF08` |
 | GPIO | P3_9 POWER (active low), P7_9 sub-CPU handshake, live `pins` QOM property | `0x2011D6EC`, `0x20120960` |
 | Deep standby | DSFR reset value; STBCR1 bits 7:6 + WFI = deep standby; POWER press cancels it (A9 reset, DSFR factor bit) | `0x2007BB10`, `0x20078278`, loader `0x20004840` |
 | (from the IC-7300 machine, unchanged) | GIC, OSTM, WDT, RIIC0-2 (+EEPROM, RTC), SCIF, SDHI, VDC5 compositor, OpenVG, L2C | — |
 
 ### Known gaps
 
-- ~~Boot hook~~: solved, see the power-on sequence above (`--force-on` is kept in
-  `qemu705.py` for runs without the sub-CPU firmware).
-- **Main DSP and DV DSP not emulated.**
+- The ARM's boot stream into the SHARC (RSPI4, gated by P7_6) is not fed to the simulator.
+  `sharc_sim.py` loads the program from the parsed loader blocks instead. The DV DSP
+  likewise starts from its boot table rather than through the C55x ROM loader.
+- **Audio:** no samples move between the ARM SSIFs, the SHARC SPORTs, the DV DSP I2S and
+  the codecs. The SHARC FIR accelerator is not modelled.
+- The FPGA is a dummy. RF, Wi-Fi, BT and GPS are absent.
+- The clock shows 0:00, and power-off by long press does not work (see above).
+- Bridge timing: the second halves of the DSP-program and FPGA version tags sometimes get
+  no reply.
+
+DSP boot background, kept because the encoding work is reusable [FW]:
   - *DV DSP* = TI C55x. The region-0 "DSP-A" boot table is **its** second-stage loader (C55x
     code driving the C55x SPI controller at I/O 0x3000–0x300A with SPI-flash READ/WREN/PP/
     RDSR; checks a tag at flash 0x3FFFC, then loads the DSP-B image and jumps through
@@ -257,8 +269,7 @@ UI language is Japanese (factory default: the settings EEPROM is blank).
     READ (`03`) at flash **0x40008**, then the RSPI4 TX-empty ISR `0x2011D378` keeps
     clocking 32-bit dummy words while **P7_6** is high, at most 0x40000 bytes, so the flash
     streams region 1 straight into the DSP. Then n=2, and the ARM waits for **P7_7** to go
-    high (DSP up) [FW]. In the VM the stream stops after 4 bytes because `rspi_gen.c` has
-    no TX-empty interrupt yet [VM].
+    high (DSP up) [FW].
   - Region-1 stream layout: 0x600 bytes = 256 × 48-bit instructions (zero padded at the
     end; all-zero words at the start = NOP), then three-word block headers. **The main DSP is an ADSP-21478 SHARC** [EXT: service manual,
     IC202]. The earlier signature tests (SHARC, DSP563xx, C55x, Nios II, Blackfin) were all
@@ -280,9 +291,6 @@ UI language is Japanese (factory default: the settings EEPROM is blank).
     instructions in short-word space), so the decoder needs the VISA forms too.
     Lesson: a negative ISA signature test means little until the
     container encoding (bit order, word size, packing) is known.
-- **Input:** touch/keys path not identified yet (not on I2C: RIIC0=EEPROM 0x53,
-  RIIC1=0x6B/0x35; most likely via the sub-CPU status frame).
-- No audio, no RF; Wi-Fi/BT/GPS absent.
 
 ### Running it
 
@@ -306,9 +314,10 @@ and interrupts (IFR write-1-to-clear, IVPD vectors). Unknown forms raise instead
 guessing.
 
 Status: from the DSP-B entry (byte 0xA9AC) the firmware sets the clocks/PLL (0x1C00 block),
-SAR ADC (0x7012..0x701A), the unidentified 0x3510..0x353C block, and I2S0 (0x2800: 0x20,
-0x1C, 0x28, enable), enables IER0 = 0x0AA0 and runs its main loop, polling its I2S receive
-rings and housekeeping. Five million instructions run with no unimplemented form.
+SAR ADC (0x7012..0x701A), the McSPI (0x3510..0x353C) and I2S0 (0x2800: 0x20, 0x1C, 0x28,
+enable), enables IER0 = 0x0AA0 and runs its main loop, serving the host link and polling
+its I2S receive rings. Five million instructions run with no unimplemented form. Linked
+to QEMU, it answers the ARM's version request (see "ARM <-> DV DSP link").
 
 Findings on the way:
 - IDA reports some dual MAC/MAS::MOV forms one byte short (the trailing byte stays
@@ -322,22 +331,13 @@ Findings on the way:
   0x352C/2D CH0CONF, 0x3530 CH0STAT, 0x3534 CH0CTRL, 0x3538/39 CH0TX, 0x353C/3D CH0RX,
   0x3580/0x35A0 DMA FIFO ports). DSP-B sets it up as a **slave** (MODULCTRL = 4), channel 0
   with 8-bit words (CH0CONF 0x0001_03C3), IRQENABLE = TX0_EMPTY + RX0_FULL, CH0CTRL = 1, TX
-  = 0xFF (0x18539..0x1858F), and repeats that set-up periodically while the link is idle.
+  = 0xFF (0x18539..0x1858F). (An apparent periodic re-init was a simulator bug, see below.)
   The master is the ARM's **RSPI0**: its length-framed packets `[L][type][L-2 bytes][FF]`
   (ARM 0x201FFA44 / 0x201FFF08 / 0x20202128) carry the DV DSP's status, including the
   version shown as "DV DSP" (block 0x203E1B67). The service manual's C5517 pin list shows
   the McSPI pins (shared with MMC1), which fits.
-- ARM side (earlier note, partly superseded): apart from the McSPI, the DV DSP's links are I2S0/I2S2. ARM SCIF5 stays silent during
-  boot. The ARM's serial-audio ports in use are SSIF0, SSIF3 and SSIF5, all DMA-driven
-  with 288-byte buffers (`0x200FEF94`; DMA request sources 225/226, 238, 246). Which of
-  them faces the DV DSP is the next question.
-- **The DV DSP is behind the main DSP [FW]:** the ARM stores the DV DSP version (block
-  `0x203E1B67`, shown as "DV DSP" in adjust mode) from its status handler
-  (`0x20202128`), which consumes RSPI0 packets, and **RSPI0 is the DV DSP's own McSPI link**
-  (see the McSPI note below), not a relay through the main DSP. With no SPI/UART on the DV DSP side, its only links are I2S0/I2S2, so the
-  ARM reaches it through the main DSP, which relays versions (and presumably commands and
-  voice frames). Linking the DV DSP into the radio therefore needs the main DSP running
-  too [INF, strong].
+- The DV DSP's other links are I2S0 (discriminator in, modulation out) and I2S2
+  (pass-through). Their peers are not traced yet.
 
 ## Main DSP (ADSP-21478 SHARC) [FW]/[EXT]
 
@@ -353,10 +353,6 @@ itself with the final 256 instructions, IDLEs until the DMA interrupt and jumps 
 Manual errata noted: the chapter-10 table prints the Type 6a "with mem data move" layout
 twice; the "without move" form is group 000 00010 with the same SHIFTIM field (inferred
 from the kernel word 0x023E7800FF22 = `R2 = LSHIFT R2 BY -1`, used to halve a count).
-
-Next: the SHARC core simulator (compute unit, DAGs, sequencer with delayed branches and
-loop stack, interrupts), the SPI-slave boot path and IOP registers, then the second-stage
-program load.
 
 VISA decoding (`sharc_dis.decode_visa` / `visa_stream`): instruction length comes from the
 first parcel (1100 = 2c; 1001 + bits 36:34 = 16a/16b/15b/3c; bit 39 for 2b/17b/11c; 21c/22c
@@ -376,10 +372,10 @@ parcels with the 2147x LW/48-bit/NW/SW windows; IOP registers below 0x40000 are 
 The image is loaded straight from the parsed loader blocks (no boot-kernel emulation) and
 starts at the reset vector 0x8C004.
 
-Status: the real firmware runs >1,000,000 instructions: ADI C-runtime start (DAG/stack
-setup for both register sets, C stack 0xE2000..0xE3FFE), data init, SIMD enable, peripheral
-setup (IOP 0x1000.. SPI, 0x1084, 0x1C00.., 0x2000/0x2001, 0x4400.., SYSCTL 0x30024), then a
-timed busy-wait (count to 0x5DC0).
+Start-up order seen [VM]: ADI C-runtime start (DAG/stack setup for both register sets, C
+stack 0xE2000..0xE3FFE), data init, SIMD enable, peripheral setup (IOP 0x1000.. SPI,
+0x1084, 0x1C00.., 0x2000/0x2001, 0x4400.., SYSCTL 0x30024), a timed busy-wait (count to
+0x5DC0), then heap and object set-up.
 
 Conventions learned from the code [FW]:
 - VISA calls: `CJUMP f (DB); DM(I7,M7) = R2; DM(I7,M7) = <last parcel of the call
@@ -401,7 +397,7 @@ Conventions learned from the code [FW]:
 - SIMD: PEy's half of a post-modify access uses the I value from before the instruction
   (address + 1), not the already-incremented one.
 
-Current stop [VM]: the firmware runs its complete init (~500,000 instructions: C runtime,
+Main loop [VM]: the firmware runs its complete init (~500,000 instructions: C runtime,
 heap, malloc'd objects, filter tables, codec set-up) and enters its main loop at 0x128BC9,
 which calls three service routines and then `IDLE` (0x13046F) until an interrupt.
 (An earlier stop at ~62,000 instructions was `exit()` after malloc failed; that was the
@@ -416,9 +412,8 @@ type 15b G-bit decode bug, not the firmware waiting.) Peripherals it uses during
   48=0F, 00=00, 01=80, then repeats part of the set. The register numbers stay within
   0x00..0x4F; the only codecs in the service manual are two AK4951s, so this is most
   likely one of them [INF] (address not yet checked against the data sheet).
-- IMASK at idle = P14I (DPI) + CB7I (C stack overflow); LIRPTL = 0, so the SPIB
-  interrupt is not yet enabled. Whatever enables it must come from a main-loop service
-  routine or from SPORT/timer activity.
+- Interrupt enables are built at run time (see PX below). An early reading of "LIRPTL = 0,
+  nothing enabled" came from the simulator's too-narrow PX register, not from the firmware.
 `Twi` and `Dpi` (DPI_IRPTL at 0x1C32, read-to-clear) in `sharc_sim.py` model this.
 
 Interrupts and the audio heartbeat [FW/VM]:
@@ -444,7 +439,7 @@ Interrupts and the audio heartbeat [FW/VM]:
 
 ARM <-> main-DSP link: **RSPI3** on the ARM (master, PIO), SPIB slave on the DSP [FW]
 (correction: an earlier note said RSPI0. RSPI0 carries length-framed packets
-`[L][type][L-2 bytes][FF]`, apparently to the wireless/BT unit; it is not the SHARC.)
+`[L][type][L-2 bytes][FF]` to the DV DSP, see below.)
 - Words are 4 bytes, big-endian, one chip-select frame each (ARM 0x20118E00 writes SPCR then
   four SPDR bytes; RX trigger level 4, SPBFCR = 0x32). Handshake: DSP FLAG2 -> ARM **P7_6**
   (PPR7 bit 6), high while the DSP has a status frame queued.

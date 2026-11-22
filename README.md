@@ -7,18 +7,19 @@ proof of concept, and a full-radio QEMU emulation that boots the real firmware.
 Start with [`ic705/STATE.md`](ic705/STATE.md) (live state, resume point), then
 [`ic705/ARCHITECTURE.md`](ic705/ARCHITECTURE.md) and
 [`ic705/DMR_FEASIBILITY.md`](ic705/DMR_FEASIBILITY.md) (verdict). Emulation details
-are in [`ic705/EMULATION.md`](ic705/EMULATION.md).
+are in [`ic705/EMULATION.md`](ic705/EMULATION.md). How SQ6EMM's ICAP app runtime taps
+audio, and what that means for DMR, is in [`ic705/ICAP.md`](ic705/ICAP.md).
 
 ## Hardware map
 
 | Block | Part | Runs |
 |---|---|---|
 | Main CPU | Renesas RZ/A1H (Cortex-A9) | Main image on Keil RTX: UI, VDC5 display, SD, settings, radio control; boots and updates the DSPs and FPGA |
-| Sub CPU | STM32L051 class (Cortex-M0+) | Power sequencing, front-panel keys (ADC ladders), dial, charger; talks to the main CPU over a SCIF3 link |
+| Sub CPU | ST STM32L051R8 (Cortex-M0+) | Power sequencing, front-panel keys (ADC ladders), dial, charger; talks to the main CPU over a SCIF3 link |
 | Main DSP | Analog Devices ADSP-21478 (SHARC) | Main signal processing; booted by the ARM streaming its program over RSPI4; control link = its SPIB (slave) on the ARM's RSPI3 |
 | DV DSP | TI TMS320C5517 (C55x) | D-STAR digital-voice vocoder path and GMSK modulator; host link = its McSPI (slave) on the ARM's RSPI0 |
-| FPGA | Intel Cyclone 10 LP class | Glue/RF-side logic; configuration stored in the DSP flash group |
-| Codecs | AKM AK4951 (x2) | Audio ADC/DAC |
+| FPGA | Intel Cyclone 10 LP (10CL025) | RF-side logic (role not traced); configuration stored in the DSP flash group |
+| Codecs | AKM AK4951 (x2) | Audio ADC/DAC; one is set up by the main DSP over I2C (0x18) [INF] |
 | WLAN | TI CC31xx | Wi-Fi network processor |
 
 ## Emulation status

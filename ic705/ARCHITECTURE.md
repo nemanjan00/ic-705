@@ -9,14 +9,16 @@
 | Display | RZ/A1 VDC5 + LVDS; OpenVG/EGL at `0xE8100000`; libpng, libjpeg-turbo, FreeType, Iwata fonts | — | [FW] |
 | SD card | FAT through a driver logging `GRP_FS` | — | [FW] |
 | WLAN | TI SimpleLink CC31xx ("NWP" abort strings, `/sys/BTL_sflash.ptc`) | WLAN group | [FW] |
-| Sub CPU (`aux2`) | Cortex-M, 64 KiB at `0x08000000`, RCC `0x40021000`, GPIO `0x5000xxxx` → STM32G0/L0 class | aux group | [FW] chip family [INF] |
+| Sub CPU (`aux2`) | **ST STM32L051R8** (Cortex-M0+), 64 KiB at `0x08000000`; SPI1 slave clocked by the ARM's SCIF3 | aux group | [FW], part [EXT: service manual] |
 | `aux1` | 896-byte Thumb stub at `0x20000008` | aux group | [FW] |
-| Main DSP ("IF-DSP", IC202) | **Analog Devices ADSP-21478** (SHARC 2147x) | DSP group, program stream at flash `0x40008`, data at `0x80000`; booted by the ARM over RSPI4 | [EXT: service manual parts list] |
+| Main DSP ("IF-DSP", IC202) | **Analog Devices ADSP-21478** (SHARC 2147x) | DSP group: boot stream at flash `0x40008`, streamed in by the ARM over RSPI4; `0x80000` block read at run time [INF] | part [EXT: service manual], code [FW] |
 | DV DSP (IC602) | **TI TMS320C5517** (C55x); version `1.11` | DSP group, boot table at `0x10000` | [FW], part [EXT: service manual] |
 | FPGA | Intel/Altera (Cyclone IV E / 10 LP class), 2.79 Mbit RBF stored bit-reversed | DSP group `0x180000` | vendor [FW], part [INF] |
 
 Version list from Icom's 1.40 notes [EXT]: Main 1.40, Sub 1.01, DSP Program 1.12,
 DSP Data 1.00, FPGA 1.01, DV DSP 1.11.
+The emulated sub-CPU firmware reports `1.20-E00` (adjust mode shows `S 1.20-E00`), which
+does not match "Sub 1.01". What Icom's "Sub" number refers to is open [VM]/[EXT].
 
 ## The DSP group (`dsp.image.bin`, 2 MiB decoded)
 
@@ -24,16 +26,21 @@ DSP Data 1.00, FPGA 1.01, DV DSP 1.11.
 |---|---|---|
 | `0x000000` | C55x boot table, sig `0x09AA`, entry byte `0xF256`, 9 PLL/clock register writes (`0x1C00`–`0x1C23`), 5 sections in word range `0x7000`–`0x8000` → ~5 KiB loader stub ("DSP-A") | [FW] |
 | `0x010000` | C55x boot table ("DSP-B" = **DV DSP**), entry byte `0xA9AC`, 11 sections, ~170 KiB. Contains UTF-16 `1.11-000` | [FW] |
-| `0x040000` | `"30601120"` header, ~141 KiB, entropy ~6.6, no C55x signature | [FW], meaning [INF] |
-| `0x080000` | `"30001000"` header + 776 × (byte offset, 16-bit word count) table; 324 non-empty entries, ~830 KiB, entropy 7.1 | [FW], meaning [INF] |
-| `0x180000` | `"30001010"` header + FPGA bitstream | [FW] |
+| `0x040000` | `"30601120"` tag, then the **SHARC boot stream** from `0x40008`: 256-instruction kernel + ADI loader blocks (`tools/sharc_ldr.py`, `EMULATION.md`) | [FW] |
+| `0x080000` | `"30001000"` tag (reported as the DSP **data** version) + 776 × (byte offset, 16-bit word count) table; 324 non-empty entries, ~830 KiB, entropy 7.1. Most likely SHARC data loaded through its SPI master at run time | tag [FW], contents [INF] |
+| `0x180000` | `"30001010"` tag (FPGA version) + FPGA bitstream | [FW] |
+
+The three 8-character tags are what the version check compares: the SHARC reads them
+itself over its SPI master and reports them to the ARM (`EMULATION.md`) [FW]/[VM].
 
 ## DSP / FPGA flash and the update path [FW]
 
 - The DSP group (2 MiB) lives in a **separate 16 MiB SPI-NOR on RSPI4** (`0xE800E800`).
-  The ARM programs it during SD updates. At runtime the ARM never parses the C55x boot
-  table (no `0x09AA` constant in the ARM image), so the DSPs presumably boot from this
-  flash [INF].
+  The ARM programs it during SD updates. At boot the ARM streams region 1 into the SHARC
+  (`0x2011D3E0`) [FW]. The ARM never parses the C55x boot table (no `0x09AA` constant in
+  the ARM image), so the DV DSP presumably boots from this flash itself through its ROM
+  loader and the DSP-A stub [INF]. The SHARC also reads this flash with its own SPI master
+  (chip select FLAG8) [FW], so the flash is shared between the ARM and the SHARC.
 - Flash regions (updater table at `0x202E2218`): `0:[0x000000,0x040000)` DSP-A + DV DSP,
   `1:[0x040000,0x080000)`, `2:[0x080000,0x180000)`, `3:[0x180000,0x200000)` FPGA.
 - Header bytes 28..43 hold four 4-byte region versions (`1.41 3.06 3.00 3.00` in E140).
@@ -54,22 +61,55 @@ DSP Data 1.00, FPGA 1.01, DV DSP 1.11.
 data[word_count]` until a `0x0000` count. All big-endian. Sections are sometimes
 preceded by `0x2020` words (C55x NOP padding of the previous section). [FW]
 
+## Control links [FW]
+
+| Link | ARM side | Peer | Format | Handshake |
+|---|---|---|---|---|
+| Main DSP control | RSPI3, master, PIO | SHARC SPIB, slave, DMA | 4-byte big-endian words; DSP switches half-duplex between receive and status-frame transmit | DSP FLAG2 → ARM P7_6 |
+| Main DSP boot | RSPI4 (flash READ at `0x40008`) | SHARC SPI slave boot | the flash streams straight into the DSP while P7_6 is high | P7_7 = DSP up |
+| DV DSP control | RSPI0, master, DMA + PIO | C5517 McSPI, slave | packets `[L][type][L-2 data][FF]` both ways | DV GPIO15 → ARM P3_8 |
+| Sub-CPU | SCIF3, clock-synchronous | STM32L051 SPI1 slave | status frames `FC off data… FE` | P7_11/P5_3 out, P7_9/P5_4 in |
+| Settings EEPROM | RIIC0 (writes) + bit-banged reads on P1_0/P1_1 | 24M02-class, 256 KiB | I2C 0x50..0x53 | — |
+| Charger, RTC | RIIC1 | BQ2571x-style 0x6B, RX-8803 0x32 | I2C | RTC on IRQ0 |
+| SHARC → codec | (SHARC TWI) | AK4951 at I2C 0x18 [INF] | register writes at init | — |
+
+SCIF5 (clock-synchronous, ≈ 10 kbit/s) was the early candidate for the DV DSP link. It
+stays silent during boot, and the DV link turned out to be RSPI0/McSPI [VM]/[FW].
+
+## Audio links (partly known)
+
+- **ARM serial audio:** SSIF0, SSIF3 and SSIF5, all DMA ping-pong with 288-byte halves
+  (36 stereo 32-bit frames, 48 kHz) [FW].
+  - SSIF0 receive is DMAC ch3 (left → task queue, right → `0x200FFAE0`).
+  - SSIF0 transmit is DMAC ch4.
+  - ICAP taps SSIF0 here (`ICAP.md`).
+  - Which chip is on the far end of each SSIF is **open**.
+- **SHARC:** all eight SPORTs run chained DMA. SPORT1/2/6/7 transmit and SPORT0/3/4/5
+  receive [VM]. The SPORT4 block interrupt is the audio heartbeat that runs the filter
+  chain [FW].
+- **DV DSP:** I2S0 left in = discriminator-like 48 kHz stream to the GMSK demodulator;
+  I2S0 right out = FM modulation samples; I2S2 is a pass-through each way [FW]. The I2S0
+  peer is open (most likely the SHARC [INF]).
+
 ## Signal flow (current model)
 
 ```
-antenna → RF → ADC → FPGA (DDC, IF filter?, FM discr.?) ──┐
-                                                          ▼
-                                         main DSP (filters, demod, AGC, audio)
-                                                          │ I2S, 48 kHz [FW on DV side]
-                                                          ▼
-                                       DV DSP (GMSK modem, AMBE vocoder)
-                                                          │
-                                         ARM (D-STAR framing, UI, ICAP apps)
+antenna → RF → ADC → FPGA (DDC, IF filter?) ──► SHARC main DSP (filters, demod, AGC, audio)
+                                                 │  SPORTs (48 kHz)
+                     ┌───────────────────────────┼─────────────────────────┐
+                     ▼                           ▼                         ▼
+           DV DSP I2S0 (GMSK modem,      ARM SSIF0/3/5 (USB audio,     AK4951 codecs
+           AMBE vocoder) [peer INF]      LAN audio, ICAP apps)         (speaker, mic)
+                     │
+                     └── McSPI ◄──► ARM RSPI0 (D-STAR framing, UI)
+ARM RSPI3 ◄──► SHARC SPIB (control, status, versions)
 ```
+
+The SPORT ↔ SSIF/I2S/codec mapping in this diagram is [INF]; only the control links are
+[FW].
 
 - The FPGA→main-DSP baseband is reported as **12 kHz wide at 36 kHz** sample rate
   [EXT: VA7OJ test report, quoted in sq6emm/icom-custom-firmware#6].
-- Who sits on the other end of the DV DSP's I2S0 (FPGA or main DSP) is **open** [INF].
 
 ## Parts from the service manual [EXT]
 

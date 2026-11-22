@@ -31,15 +31,17 @@ app binaries in the release bundle. Nothing vendor-owned is copied here.
    `0x2037EBB0`) into the `audio_read` ring. While the radio transmits (flag `0x203806F4`
    bit 7) it marks an overrun instead.
 
-So apps hear the main DSP's audio output on SSIF0-left, band-limited to below 4 kHz.
-What processing the SHARC applies before that output (de-emphasis, filters, NR, AGC) has
-not been traced yet [INF]. The README's "turn NR off for APRS" note suggests the tap is
+So apps hear SSIF0-left, band-limited to below 4 kHz. That SSIF0's peer is the SHARC is
+[INF]; the SSIF-to-chip mapping is not traced yet (`ARCHITECTURE.md`).
+What processing is applied before that output (de-emphasis, filters, NR, AGC) has not been
+traced yet. The README's "turn NR off for APRS" note suggests the tap is
 after NR [EXT].
 
 ## TX path [FW]
 
 - The stock routine `0x20100234` pulls 36-sample blocks from `0x201F5A00` into `0x20401E9C`
-  and hands them to `0x200FF6AC`, which is the TX audio towards the DSP. `0x201F5A00` is
+  and hands them to `0x200FF6AC`, the serial-audio transmit side (destination SSIF not yet
+  traced). `0x201F5A00` is
   the PC-to-radio (USB "MOD") audio source [INF from context].
 - ICAP installs `0x20373B00` in its place, through a function pointer kept at
   `0x203742F8`. That code upsamples the 8 kHz app ring to 48 kHz with a 6-phase, 6-tap

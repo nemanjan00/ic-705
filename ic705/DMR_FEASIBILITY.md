@@ -6,9 +6,12 @@
 no hidden DMR support: the radio's vocoder knows only D-STAR AMBE [FW]. Everything
 else DMR needs maps onto blocks that already exist for D-STAR:
 
-- a 48 kHz raw FM discriminator at 10 samples/symbol into the DV DSP [FW]
+- a 48 kHz discriminator-like stream at 10 samples/symbol into the DV DSP, read per
+  sample by the GMSK demodulator [FW] ("raw" is [INF] until its source is traced)
 - a table-driven FM modulator out of the DV DSP into a 48 kHz ring [FW]
-- a host CPU with spare MIPS and an existing app loader (ICAP) [FW]
+- a host CPU with spare MIPS and an existing app loader (ICAP) [FW]. Its audio API is
+  only 8 kHz, post-DSP audio (`ICAP.md`), so a DMR app would need a new 48 kHz tap
+  and an unprocessed path
 
 Two things are not known yet:
 
@@ -56,7 +59,7 @@ least certain part.
 | R5 | TDMA timing | Simplex/hotspot: continuous TX with one used slot. Repeater uplink: needs about 30 ms T/R keying. | [INF] |
 | R6 | DMR framing, FEC, LC | Software only (ARM ICAP app or DV DSP) | [INF] |
 | R7 | Patch delivery | **Done in emulation**. `tools/dsp_reseal.py` re-seals the DSP group, bumps the region-0 version and re-encrypts with the header-derived IV. The radio's own updater code, run in Unicorn, writes exactly the patched image into the DSP flash ([POC.md](POC.md)). On a real radio: unverified [HW]. | [FW] rules, [VM] run |
-| R8 | ARM↔DV DSP bandwidth | Candidate link SCIF5, clock-sync, about 10 kbit/s. Enough for vocoder frames (2450–3600 bit/s), too tight for raw dibits plus overhead. | [VM] config, [INF] rate |
+| R8 | ARM↔DV DSP bandwidth | The link is the ARM's RSPI0 ↔ the C5517 McSPI (slave), with packets of up to 0xA5 bytes and a GPIO handshake (`DV_DSP.md`). The bit rate is not measured yet. Being SPI, it is likely well above the 9.6 kbit/s raw DMR dibit stream. (An earlier note said SCIF5 at about 10 kbit/s; that link is not used.) | [FW] link, [INF] rate |
 
 ## R1 — vocoder tables
 
@@ -79,7 +82,8 @@ Options for the codec:
 
 - **AMBE+2 on the ARM.** The Cortex-A9 has plenty of headroom. Open code exists:
   mbelib (decode), OP25 (half-rate encoder) [EXT]. Audio would reach the ARM through
-  the same path the ICAP decoders use.
+  the same path the ICAP decoders use. That path is 8 kHz post-DSP audio today, which is
+  fine for voice but not for the modem (`ICAP.md`).
 - **AMBE+2 inside the DV DSP**, next to the existing MBE code. The MBE synthesis and
   analysis exist, so only the quantizers and bit allocation differ. Faster, but it
   means writing C55x code.
@@ -103,11 +107,13 @@ RF → [FPGA/main DSP] → discriminator → I2S0 L (48 kHz) → DV DSP: RRC mat
 2. **[HW] RX bandwidth (R4):** in DV mode, feed a signal generator at ±3/±4/±5 kHz FM
    deviation and log the I2S0 L amplitude. Needs a DSP-side tap (debug patch) or a
    scope on the I2S lines.
-3. **[FW] Host protocol:** decode the SCIF5↔DV DSP frame format (ARM driver + DSP
-   `0x65FC` struct). Needed to carry DMR payload.
-4. **[VM] C55x micro-emulator** for `gmsk_mod_bit`/`fir`, to prove a 4FSK table swap
-   produces the right waveform before touching a radio.
-5. **[FW] DSP-group re-seal** in `repack` (separate autokey domain + MD5).
+3. **[FW]/[VM] Host protocol:** the RSPI0 ↔ McSPI packet framing is known and runs in
+   emulation. Still to decode: the packet types for D-STAR voice/data, which a DMR payload
+   would reuse.
+4. **[FW]/[VM] Audio path through the SHARC:** which SPORT feeds the DV DSP's I2S0 and
+   the ARM's SSIF0, and what filtering sits between the demodulator/modulator and them.
+   This decides R3/R4 and whether an ICAP-side modem can work.
+5. ~~C55x micro-emulator~~ and ~~DSP-group re-seal~~: done (`POC.md`).
 
 ## Fallback: flat data path
 

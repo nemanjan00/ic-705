@@ -101,7 +101,8 @@ Missing for on-air DMR:
   steady outer level at **0.53 FS ≈ 794 Hz** at the D-STAR scale (0.80 FS = 1.2 kHz) —
   **2.45× short of 1944 Hz**. The gain after the DV DSP must go up for this mode.
 - **Dibit source:** the bit pump (`0x1575F`) passes D-STAR bits; it needs a dibit stream
-  from the host (host protocol over the SCIF5-like link, or a DSP-side DMR framer).
+  from the host (new packet type on the RSPI0 ↔ McSPI link, `DV_DSP.md`), or a DSP-side
+  DMR framer.
 - **RX:** 4FSK demodulator on the I2S0-L discriminator (same structure in reverse).
 - **AMBE+2** in software (R1) and DMR framing/FEC (R6).
 - Radio acceptance of a re-sealed DSP group is unverified [HW].
