@@ -322,3 +322,22 @@ Findings on the way:
   ARM reaches it through the main DSP, which relays versions (and presumably commands and
   voice frames). Linking the DV DSP into the radio therefore needs the main DSP running
   too [INF, strong].
+
+## Main DSP (ADSP-21478 SHARC) [FW]/[EXT]
+
+`tools/sharc_dis.py`: own 48-bit SHARC decoder/disassembler written from the opcode
+tables of the SHARC Processor Programming Reference (rev 2.4; in gitignored `docs/`).
+It decodes every instruction of the 256-instruction boot kernel. The kernel is the
+standard ADI SPI-slave loader: it clears IMASK/IRPTL, reads the next block header into
+R8/R2/R3 through the SPI receive buffer (`DM(0x92003..0x92005)`), dispatches on the tag
+(zero fill, INIT_L32, INIT_L48 via PX, INIT_L64), and on FINAL_INIT programs the SPI
+receive DMA (`DM(0x1080)` = 0x92000, `DM(0x1081)` = 1, `DM(0x1082)` = 0x180) to overwrite
+itself with the final 256 instructions, IDLEs until the DMA interrupt and jumps to 0x8C003.
+
+Manual errata noted: the chapter-10 table prints the Type 6a "with mem data move" layout
+twice; the "without move" form is group 000 00010 with the same SHIFTIM field (inferred
+from the kernel word 0x023E7800FF22 = `R2 = LSHIFT R2 BY -1`, used to halve a count).
+
+Next: the SHARC core simulator (compute unit, DAGs, sequencer with delayed branches and
+loop stack, interrupts), the SPI-slave boot path and IOP registers, then the second-stage
+program load.
