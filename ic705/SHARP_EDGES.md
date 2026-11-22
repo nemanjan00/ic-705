@@ -63,6 +63,9 @@ Symptom → cause → fix. Append the moment one bites.
   for the DSP link; its packet format (length-framed) does not match the SHARC's 4-byte
   words, while RSPI3 traffic matched the DSP's own dispatch table byte for byte. Match
   formats on both ends before wiring. [FW]
+- **"Unidentified register block" plus "chip has no X" is a trap.** The C5517 block at 0x3500
+  was the McSPI; once identified from the data sheet's register table, the "DV DSP has no SPI"
+  conclusion fell. Look up unknown I/O blocks before drawing link conclusions. [FW]
 - **A peripheral that raises "RX full" after one byte splits multi-byte words** when the
   real part waits for a trigger level (RSPI SPBFCR.RXTRG). [VM]
 - **SPI-flash models must see chip-select edges without traffic** (FLAG8 goes high between

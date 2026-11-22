@@ -316,14 +316,25 @@ Findings on the way:
 - Computed switch tables (`mov dbl(*AR3), AC0; b AC0`, e.g. table at word 0x1FC24) point at
   code IDA never disassembled; those entries were turned into code in the IDA database and
   the export regenerated.
-- ARM side: the DV DSP has no UART/SPI, only I2S0/I2S2. ARM SCIF5 stays silent during
+- **Correction [FW]: the DV DSP has a host link, its McSPI.** The "unidentified 0x3510..0x353C
+  block" is the C5517 **McSPI** (C5517 data sheet table 6-16: 0x3500 REVISION, 0x3510
+  SYSCONFIG, 0x3514 SYSSTATUS, 0x3518/19 IRQSTATUS, 0x351C/1D IRQENABLE, 0x3528 MODULCTRL,
+  0x352C/2D CH0CONF, 0x3530 CH0STAT, 0x3534 CH0CTRL, 0x3538/39 CH0TX, 0x353C/3D CH0RX,
+  0x3580/0x35A0 DMA FIFO ports). DSP-B sets it up as a **slave** (MODULCTRL = 4), channel 0
+  with 8-bit words (CH0CONF 0x0001_03C3), IRQENABLE = TX0_EMPTY + RX0_FULL, CH0CTRL = 1, TX
+  = 0xFF (0x18539..0x1858F), and repeats that set-up periodically while the link is idle.
+  The master is the ARM's **RSPI0**: its length-framed packets `[L][type][L-2 bytes][FF]`
+  (ARM 0x201FFA44 / 0x201FFF08 / 0x20202128) carry the DV DSP's status, including the
+  version shown as "DV DSP" (block 0x203E1B67). The service manual's C5517 pin list shows
+  the McSPI pins (shared with MMC1), which fits.
+- ARM side (earlier note, partly superseded): apart from the McSPI, the DV DSP's links are I2S0/I2S2. ARM SCIF5 stays silent during
   boot. The ARM's serial-audio ports in use are SSIF0, SSIF3 and SSIF5, all DMA-driven
   with 288-byte buffers (`0x200FEF94`; DMA request sources 225/226, 238, 246). Which of
   them faces the DV DSP is the next question.
 - **The DV DSP is behind the main DSP [FW]:** the ARM stores the DV DSP version (block
   `0x203E1B67`, shown as "DV DSP" in adjust mode) from its status handler
-  (`0x20202128`; correction: that handler consumes RSPI0 packets, not the main-DSP link, so
-  how the DV version reaches the ARM is open again). With no SPI/UART on the DV DSP side, its only links are I2S0/I2S2, so the
+  (`0x20202128`), which consumes RSPI0 packets, and **RSPI0 is the DV DSP's own McSPI link**
+  (see the McSPI note below), not a relay through the main DSP. With no SPI/UART on the DV DSP side, its only links are I2S0/I2S2, so the
   ARM reaches it through the main DSP, which relays versions (and presumably commands and
   voice frames). Linking the DV DSP into the radio therefore needs the main DSP running
   too [INF, strong].

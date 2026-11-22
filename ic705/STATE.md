@@ -8,9 +8,10 @@ Tags: [FW] firmware static · [HW] radio · [VM] emulator · [EXT] outside · [I
   link) talks over a socket to `tools/dsp_bridge.py`, which runs the SHARC firmware in
   `sharc_sim.py`. With the time sync and the DSP's own flash reads, the ARM accepts the
   main-DSP and FPGA versions, and the boot popup now reads **"DV DSP firmware is wrong
-  version"**. Next: link the DV DSP (`c55sim.py`) behind the main DSP and find how its version
-  reaches the ARM. (RSPI0 is not the DSP link; it carries length-framed packets, probably
-  for the wireless unit.)
+  version"**. Next: the DV DSP. **RSPI0 is the ARM <-> DV DSP link**: the C5517's McSPI, set up as a
+  slave by DSP-B (the old "unidentified 0x3500 block"). It carries length-framed packets with
+  the DV version. To do: a McSPI slave model in `c55sim.py` (plus its DMA path) and a
+  second bridge on RZA1H_RSPI0_SOCK.
 
 - **2026-11-22: DV DSP firmware runs in `tools/c55sim.py`** (whole-firmware C55x core) to its
   main loop. The ARM reaches the DV DSP only through the main DSP (DV version arrives in the
