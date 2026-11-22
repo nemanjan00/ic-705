@@ -156,10 +156,28 @@ and 3; layout tag "SX4075 V4.51-E00" at 0x3FE40 (image builder `0x20065420`). Mo
 ~20 KB on every power-on before reading it, so it currently re-initialises each boot
 (defaults → Japanese UI) [VM].
 
-**Other buses seen [FW]:** RSPI3 = FPGA register port (`0x20118E00`); RIIC1 0x6B = 16-bit-
-register device (codec-like, `0x20019B28`); SCIF1 = CI-V frames `FE…FD` (`0x2010C134`); SCIF4 =
-byte ring of 0x36C (GPS NMEA likely, `0x20014460`); P0_5 bit-banged single-wire receiver
-(`0x20118770`, microphone keys likely). Touch path still unknown.
+**Other buses / devices identified [FW]:**
+- RSPI3 = FPGA register port (`0x20118E00` commands; `0x2011913C` read state machine). FPGA
+  status words carry a type nibble (`0x20118FA4`): type 1/9 = level bytes queued per step
+  into `0x204988BC` and smoothed (`0x2011E4D0`, S-meter-like); type 8 = 10-bit value + 2 flags;
+  type F = flag. The FPGA stays a dummy (owner's choice), so these read 0xFF now.
+- RIIC1 0x6B = battery charger, TI BQ2571x-style (16-bit registers 0x00–0x3A, status/ADC
+  0x28/0x2C read back; `0x20019B28`, `0x2001A174`). NACKs in the VM (no model yet).
+- RIIC1 0x32 = RX-8803 RTC; its interrupt is **IRQ0**, polled through IRQRR in
+  `0x200E4588` → reads 7 bytes from register 0x10 (`0x200E3B98`).
+- SCIF1 = CI-V `FE…FD` (`0x2010C134`); SCIF2 = shared driver whose pins are switched by
+  `0x2011862C` (CI-V on the remote jack with IRQ2, `0x20028FFC`, plus another port);
+  SCIF4 = byte ring of 0x36C (GPS NMEA likely); SCIF5 = DV DSP link; USB0 at 0xE8010000.
+- P0_5 bit-banged single-wire receiver (`0x20118770`, microphone keys likely).
+- Steady-state MMIO census [VM] (3 s trace on the main screen): ARM ADC ch0/1/4/5/6/7 read
+  every tick, ch2/ch3 never (gated by bit 5 of config byte `0x20380BD2`, set per power-source
+  mode); IRQRR polled every tick (RTC).
+
+**Touch: still not located.** Ruled out: sub-CPU (no I2C, its EXTI ISR is only the ARM link,
+ADC ch2/3/10 used only in the init conversion), both I2C buses, RSPI0/1/3/4, SCIF1/2/4/5,
+USB, external IRQ pins (only IRQ0 RTC, IRQ2 CI-V). Remaining guesses: ARM ADC ch2/ch3 when
+`0x20380BD2` bit 5 is set (resistive panel driven by the pins `0x201183B0` switches), or the
+FPGA status words.
 
 **Factory block 0xFC0000 [FW]:** `0x20090FA4` checks the tag "ICOM INC 2019.12" at
 `0x18FFFFF0`, a 512-byte header at `0x18FE3F50`, and a byte sum over 0x3FC00 bytes at
