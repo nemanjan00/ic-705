@@ -1238,6 +1238,38 @@ class Sharc:
         return self.exec48(w & ~0x7FFFFF, here, nxt)
 
 
+# ------------------------------------------------------------------ peripherals
+class Spi:
+    """ADSP-214xx SPI / SPIB (IOP 0x1000.. / 0x2800..): SPICTL +0, SPIFLG +1, SPISTAT +2
+    (SPIF bit 0, TXS bit 3, RXS bit 5), TXSPI +3, RXSPI +4, SPIBAUD +5, RXSPI_SHADOW +6.
+    Transfers complete at once; the attached device (callable byte -> byte) answers, default
+    0xFF. Every transfer is logged in .log as (tx, rx)."""
+    def __init__(self, base, device=None):
+        self.base, self.device = base, device
+        self.r = {}
+        self.rx = None
+        self.log = []
+
+    def rd(self, sim, a):
+        o = a - self.base
+        if o == 2:
+            return 0x01 | (0x20 if self.rx is not None else 0)
+        if o in (4, 6):
+            v = self.rx if self.rx is not None else 0
+            if o == 4:
+                self.rx = None
+            return v
+        return self.r.get(o, 0)
+
+    def wr(self, sim, a, v):
+        o = a - self.base
+        self.r[o] = v
+        if o == 3:                                   # TXSPI: one transfer
+            rxv = self.device(v) if self.device else 0xFF
+            self.rx = rxv
+            self.log.append((v, rxv))
+
+
 # ------------------------------------------------------------------ fast-forward hooks
 def ff_delay_loop(sim):
     """0x1275CD: `for (i = 0; i < 0x5DC0; i++);` busy delay on a stack local (DM(I6-2)).
@@ -1291,6 +1323,8 @@ if __name__ == '__main__':
     load_image(sim, open(a.image, 'rb').read())
     sim.goto(0x8C004)
     sim.hle.update(HLE)
+    for base in (0x1000, 0x2800):
+        sim.iop[base] = Spi(base)
     if a.trace:
         sim.trace = []
     try:

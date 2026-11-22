@@ -383,6 +383,12 @@ Conventions learned from the code [FW]:
 - SIMD: PEy's half of a post-modify access uses the I value from before the instruction
   (address + 1), not the already-incremented one.
 
-Current stop [VM]: after init (busy-wait delays fast-forwarded by a hook at 0x1275EA) the
-firmware polls SPI status `DM(0x1002)` at 0x12CB88, i.e. it is waiting for the host (ARM
-RSPI0) on its SPI slave port; a second SPI block (0x2800..0x2884) is configured as well.
+Current stop [VM]: with a minimal SPI model (`Spi`: SPIF set when idle, instant transfers)
+the firmware completes its whole start-up in ~62,000 instructions and reaches its idle loop
+(`IDLE` at 0x8C0B5, waiting for an interrupt). SPI roles:
+- SPI (IOP 0x1000, SPICTL 0x5205): **master**, 8-bit, transfer started by a TXSPI write —
+  the DSP drives a local peripheral (one transfer during start-up).
+- SPIB (IOP 0x2800, SPICTL 0x4206): **slave, DMA mode**, DMA set up at 0x2880..0x2884 — the
+  link the ARM drives on RSPI0. The DSP idles until the first host command lands there.
+Next: SPIB slave-DMA + interrupt model, and a QEMU <-> Python co-simulation bridge (RSPI0
+bytes and the P3_8 / P7_6 / P7_7 handshake lines over a socket).
