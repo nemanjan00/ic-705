@@ -191,6 +191,15 @@ no touch, same as the IC-7300's). Default calibration (blank EEPROM), measured: 
 X 443/52 px, Y 259/12 px. Modelled in `rz_a1h.c` (`touch` machine property, raw "X,Y" or
 "" = up); DMAC ch1–7 got a generic path for transfers to/from the GPIO block (`dmac.c`).
 
+**Power-off (open) [FW]/[VM]:** the debounced P3_9 state (`0x2011D6EC` → `0x20380B4C`,
+getter `0x2011C14C`) does follow a hold in the VM, and after 50 ticks `0x20122864` raises a
+long-press flag (`0x20380BD8`) and queues status frames to the sub-CPU; the flag feeds
+`0x2011DF28` → block +876, used by TX-path logic (`0x20060B84`). Power-off itself is
+`0x2007CF44`, gated on the request byte `0x203800C3` (set by the CI-V power-off command
+`0x2001FB2C`); the front-panel path to it is not found. Holding P3_9 (~10 s emulated) or the
+unidentified ladder keys ch0 L1 / ch1 L3 / ch1 L4 (~5 s) does not power off. Note P3_9 may be a
+sub-CPU-driven wake/request line rather than the key itself.
+
 **Window input [VM]:** in the GTK window, the mouse is the touch panel (pixel → raw with the
 calibration above), the wheel and Left/Right are the main dial, M/F/S/Q/X(Esc)/K/A/R/L/U/D/1/2/3
 are the ladder keys (held while held), and P is POWER.
