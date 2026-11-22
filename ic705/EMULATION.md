@@ -200,6 +200,17 @@ long-press flag (`0x20380BD8`) and queues status frames to the sub-CPU; the flag
 unidentified ladder keys ch0 L1 / ch1 L3 / ch1 L4 (~5 s) does not power off. Note P3_9 may be a
 sub-CPU-driven wake/request line rather than the key itself.
 
+**I2C write-busy fix [VM]:** the IC-7300 RIIC model holds any bus busy for an EEPROM write
+cycle (5 ms) after a write, NACKing the next addresses. On the IC-705 that only applies to
+RIIC0 (EEPROM); on RIIC1 it was refusing transactions after every charger write.
+
+**Clock (open) [FW]/[VM]:** the status-bar clock stays 0:00/0:01. The RX-8803 read path
+(`0x200E4588` polls IRQ0 in IRQRR, `0x200E3B98` reads 7 bytes from register 0x10 at device
+0x32 over RIIC1) lives in the standby/charge loops; the model now raises IRQ0 once per second
+(`rza1h_gpio_ext_irq`), but in normal running mode no RIIC1 transaction to 0x32 is ever made
+(all RIIC1 traffic is charger writes to 0x6B). Where the running UI gets its time is not
+found yet.
+
 **Window input [VM]:** in the GTK window, the mouse is the touch panel (pixel → raw with the
 calibration above), the wheel and Left/Right are the main dial, M/F/S/Q/X(Esc)/K/A/R/L/U/D/1/2/3
 are the ladder keys (held while held), and P is POWER.
