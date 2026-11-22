@@ -252,7 +252,8 @@ UI language is Japanese (factory default: the settings EEPROM is blank).
     end; all-zero words at the start = NOP), then three-word block headers. First read as an ADI SHARC boot stream, but **checked and not confirmed**: no SHARC
     signature opcodes (RTS 0x0A3E00000000, absolute JUMP/CALL 0x063E…) under any byte order
     or alignment of the 0x600-byte kernel; DSP563xx (IDA `dsp56k`) decoding of the same bytes
-    is also implausible. Core **unknown** [INF]; a chip marking or a statistical ISA classifier
+    is also implausible, and it is not C55x either (RET 0x4804 density 0.27/KB vs ≈6/KB in the
+    DV DSP image). Core **unknown** [INF]; a chip marking or a statistical ISA classifier
     (cpu_rec) would settle it.
 - **Input:** touch/keys path not identified yet (not on I2C: RIIC0=EEPROM 0x53,
   RIIC1=0x6B/0x35; most likely via the sub-CPU status frame).
