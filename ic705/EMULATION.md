@@ -257,7 +257,13 @@ UI language is Japanese (factory default: the settings EEPROM is blank).
     48-bit instructions, `(b & 0xFFFF) << 32 | a` and `c << 16 | b >> 16`. Decoded that way
     the 0x600-byte kernel is SHARC code: runs of `0x0Fxx` "Ureg = imm32" loads, 36
     jump/call-class words and RTS (0x0A3E00000000) ×2, versus 0 under every other layout.
-    The first word is 0xA5. Lesson: a negative ISA signature test means little until the
+    The first word is 0xA5.
+    Stream structure (`tools/sharc_ldr.py`): 256-instruction kernel, then 191 ADI loader
+    blocks: 95 INIT_L32 + 94 ZERO_LDATA (data at 0xB2000..0xB9D3E), a single INIT_L48 of
+    five instructions at 0x8C100, then FINAL_INIT, about 34 KB in. The rest of region 1
+    does not parse as loader blocks, so the main program presumably comes in a later,
+    custom stage (the five-instruction stub, the remaining stream, and/or region 2 with its
+    offset/length table) [INF]. Lesson: a negative ISA signature test means little until the
     container encoding (bit order, word size, packing) is known.
 - **Input:** touch/keys path not identified yet (not on I2C: RIIC0=EEPROM 0x53,
   RIIC1=0x6B/0x35; most likely via the sub-CPU status frame).
