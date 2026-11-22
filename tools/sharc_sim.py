@@ -63,9 +63,11 @@ class Sharc:
         self.dag_alt = [[0] * 16 for _ in range(4)]
         self.sreg = {n: 0 for n in D.UREG_G7}
         self.dpi_irptl = 0
+        self.tickers = []
+        self.irqstk = []                       # interrupts in service: (number, reg, bit)
         self.sreg['MODE1'] = 0
         self.ustat = {}
-        self.PX = 0
+        self.PX = 0                            # 64-bit bus exchange register
         self.MRF = 0
         self.MRB = 0
         self.MSF = 0
@@ -114,15 +116,16 @@ class Sharc:
             self.p_set(s + k, v >> (16 * k) & 0xFFFF)
 
     def ureg_load(self, ur, a):
-        """ureg = mem; PX moves all 48 bits when the address is a 48-bit window."""
+        """ureg = mem. PX is 64 bits (PX2 = 63..32, PX1 = 31..0); to/from a 48-bit window
+        it moves PX[63:16]."""
         if D.UREG_G6[ur & 15] == 'PX' and ur >> 4 == 6 and self.iw_base(a & M32) is not None:
-            self.PX = self.rd48(a & M32)
+            self.PX = self.rd48(a & M32) << 16
         else:
             self.set_ureg(ur, self.rd(a))
 
     def ureg_store(self, ur, a):
         if D.UREG_G6[ur & 15] == 'PX' and ur >> 4 == 6 and self.iw_base(a & M32) is not None:
-            self.wr48(a & M32, self.PX)
+            self.wr48(a & M32, self.PX >> 16 & 0xFFFFFFFFFFFF)
         else:
             self.wr(a, self.get_ureg(ur))
 
@@ -243,12 +246,10 @@ class Sharc:
                 return self.loopstk[-1][3] if self.loopstk and self.loopstk[-1][3] is not None else 0
             if name == 'LADDR':
                 return self.loopstk[-1][1] if self.loopstk else 0
-            if name == 'PX':
-                return self.PX & 0xFFFFFFFFFFFF
+            if name in ('PX', 'PX2'):                     # Dreg view of PX = bits 63..32
+                return self.PX >> 32 & M32
             if name == 'PX1':
-                return self.PX & 0xFFFF
-            if name == 'PX2':
-                return self.PX >> 16 & M32
+                return self.PX & M32
             if name == 'TPERIOD':
                 return self.tperiod
             if name == 'TCOUNT':
@@ -263,7 +264,7 @@ class Sharc:
         g, n = c >> 4 & 7, c & 15
         if self.pey and g not in (0, 5):
             return
-        v &= M32 if not (g == 6 and D.UREG_G6[n] == 'PX') else 0xFFFFFFFFFFFF
+        v &= M32
         if g == 0:
             self.R[n] = v
         elif g == 1:
@@ -286,12 +287,12 @@ class Sharc:
                     self.pcstk.append(v)
             elif name == 'LCNTR':
                 self.lcntr = v
-            elif name == 'PX':
-                self.PX = v
+            elif name == 'PX':                            # from a Dreg: bits 63..32
+                self.PX = v << 32
             elif name == 'PX1':
-                self.PX = (self.PX & ~0xFFFF) | (v & 0xFFFF)
+                self.PX = (self.PX & ~M32) | v
             elif name == 'PX2':
-                self.PX = (self.PX & 0xFFFF) | (v & M32) << 16
+                self.PX = (self.PX & M32) | v << 32
             elif name == 'TPERIOD':
                 self.tperiod = v
             elif name == 'TCOUNT':
@@ -758,6 +759,8 @@ class Sharc:
         h = self.hle.get(self.pc)
         if h:
             h(self)
+        for t in self.tickers:
+            t.tick(self)
         self.take_irq()
         w, n = self.fetch()
         here = self.pc
@@ -797,18 +800,45 @@ class Sharc:
                 self.tcount = self.tperiod
                 self.sreg['IRPTL'] |= 1 << 2 if False else 0
 
+    # Interrupt number (vector = 0x8C000 + 4 * number, also the priority order) for each
+    # latch bit: IRPTL bits 0..16 -> 0..16, LIRPTL P6I..P13I (bits 0..7) -> 17..24,
+    # IRPTL P14I..P16I (bits 17..19) -> 25..27, LIRPTL P17I/P18I (bits 8, 9) -> 28/29,
+    # IRPTL bits 20..31 -> 30..41. LIRPTL masks are bits 10..19, mask pointers 20..29.
+    IRQ_NUM = {('I', k): k for k in range(17)}
+    IRQ_NUM.update({('L', k): 17 + k for k in range(8)})
+    IRQ_NUM.update({('I', 17 + k): 25 + k for k in range(3)})
+    IRQ_NUM.update({('L', 8): 28, ('L', 9): 29})
+    IRQ_NUM.update({('I', k): 10 + k for k in range(20, 32)})
+
+    def pending_irqs(self):
+        out = []
+        p = self.sreg['IRPTL'] & self.sreg['IMASK']
+        for k in range(32):
+            if p >> k & 1:
+                out.append((self.IRQ_NUM[('I', k)], 'I', k))
+        l = self.sreg['LIRPTL']
+        for k in range(10):
+            if l >> k & 1 and l >> (10 + k) & 1:
+                out.append((self.IRQ_NUM[('L', k)], 'L', k))
+        return sorted(out)
+
     def take_irq(self):
         if not self.m1('IRPTEN') or self.delay:
             return
-        pend = self.sreg['IRPTL'] & self.sreg['IMASK']
+        pend = self.pending_irqs()
         if not pend:
             return
-        k = (pend & -pend).bit_length() - 1
-        self.sreg['IRPTL'] &= ~(1 << k)
-        self.push_pc(self.pc if not self.visa else self.pc)
-        self.sreg['IMASKP'] |= 1 << k
-        self.irq_ret_visa = self.visa
-        self.goto(0x8C000 + 4 * k)
+        num, reg, k = pend[0]
+        if self.irqstk and (not self.m1('NESTM') or num >= self.irqstk[-1][0]):
+            return
+        if reg == 'I':
+            self.sreg['IRPTL'] &= ~(1 << k)
+            self.sreg['IMASKP'] |= 1 << k
+        else:
+            self.sreg['LIRPTL'] = (self.sreg['LIRPTL'] & ~(1 << k)) | 1 << (20 + k)
+        self.irqstk.append((num, reg, k))
+        self.push_pc(self.pc)
+        self.goto(0x8C000 + 4 * num)
 
     def pe_swap(self):
         self.R, self.S = self.S, self.R
@@ -1114,7 +1144,7 @@ class Sharc:
             return
         if sub == 0b00000:
             if bits(w, 39, 39):
-                if not (self.sreg['IRPTL'] & self.sreg['IMASK']):
+                if not self.pending_irqs():
                     self.pc = here                            # IDLE until an interrupt
                     raise Halt('IDLE with nothing pending')
                 return
@@ -1145,11 +1175,12 @@ class Sharc:
         if not self.pcstk:
             raise Halt('return with empty PC stack')
         tgt, vs = self.pcstk.pop()
-        if rti:
-            for k in range(32):
-                if self.sreg['IMASKP'] >> (31 - k) & 1:
-                    self.sreg['IMASKP'] &= ~(1 << (31 - k))
-                    break
+        if rti and self.irqstk:
+            num, reg, k = self.irqstk.pop()
+            if reg == 'I':
+                self.sreg['IMASKP'] &= ~(1 << k)
+            else:
+                self.sreg['LIRPTL'] &= ~(1 << (20 + k))
         if delayed:
             self.delay = [3, tgt]
         else:
@@ -1223,7 +1254,7 @@ class Sharc:
             self.I[6] = self.rd(self.I[6])
             return
         if bits(w, 39, 39):
-            if not (self.sreg['IRPTL'] & self.sreg['IMASK']):
+            if not self.pending_irqs():
                 self.pc = here                                # IDLE until an interrupt
                 raise Halt('IDLE with nothing pending')
         return                                                # 21c NOP
@@ -1376,6 +1407,77 @@ class Twi:
             self.pump(sim)
 
 
+class Sports:
+    """Chained DMA for SPORT0..7 (control and DMA registers stay in sim.iop_regs).
+    Pairs: SPORT0/1 at 0xC00, 2/3 at 0x400, 4/5 at 0x800, 6/7 at 0x4800; SPCTLx at
+    base + (x & 1); channel A DMA block at base + 0x40 + 8 * (x & 1) (II, IM, C, CP), B at +4.
+    SPCTL: SPEN_A 0, SDEN_A 18, SCHEN_A 19, SDEN_B 20, SCHEN_B 21, SPEN_B 24, SPTRAN 25.
+    A chain pointer addresses the TCB's II word (offset from 0x80000, bit 19 = PCI); the TCB
+    is read downward: II, IM, C, CP. Every `period` steps each running channel finishes one
+    block: RX writes words from `source(sport, ch, n)` (default zeros), TX passes words to
+    `sink(sport, ch, words)`; then the next TCB is loaded, and if the finished TCB's link had
+    PCI set, SPxI is latched on its default programmable interrupt (PICR not modelled)."""
+    BASE = {0: 0xC00, 1: 0xC00, 2: 0x400, 3: 0x400, 4: 0x800, 5: 0x800, 6: 0x4800, 7: 0x4800}
+    IRQ = {0: ('L', 0), 1: ('I', 14), 2: ('L', 1), 3: ('I', 15), 4: ('L', 2), 5: ('I', 16),
+           6: ('I', 19), 7: ('L', 5)}
+
+    def __init__(self, period=4000, source=None, sink=None):
+        self.period, self.n = period, 0
+        self.source, self.sink = source, sink
+        self.cur = {}                       # (sport, ch) -> link value that loaded the TCB
+        self.blocks = {}
+
+    def tick(self, sim):
+        self.n += 1
+        if self.n < self.period:
+            return
+        self.n = 0
+        R = sim.iop_regs
+        for x in range(8):
+            ctl = R.get(self.BASE[x] + (x & 1), 0)
+            for ch, en, den, chen in (('A', 0, 18, 19), ('B', 24, 20, 21)):
+                if not (ctl >> en & 1 and ctl >> den & 1 and ctl >> chen & 1):
+                    self.cur.pop((x, ch), None)
+                    continue
+                d = self.BASE[x] + 0x40 + 8 * (x & 1) + (4 if ch == 'B' else 0)
+                if (x, ch) not in self.cur:              # first block: load from CPSPx
+                    if not self.load(sim, d, R.get(d + 3, 0)):
+                        continue
+                self.block(sim, x, ch, d, ctl >> 25 & 1)
+
+    def load(self, sim, d, link):
+        if not link & 0x7FFFF:
+            return False
+        p = 0x80000 + (link & 0x7FFFF)
+        R = sim.iop_regs
+        R[d], R[d + 1], R[d + 2], R[d + 3] = (sim.rd(p), sim.rd(p - 1), sim.rd(p - 2),
+                                              sim.rd(p - 3))
+        self.cur[(d >> 0, 'tcb')] = link
+        return True
+
+    def block(self, sim, x, ch, d, tx):
+        R = sim.iop_regs
+        ii, im, c = R.get(d, 0), s32(R.get(d + 1, 0)), R.get(d + 2, 0)
+        addrs = [0x80000 + ((ii + k * im) & 0x7FFFF) for k in range(c)]
+        if tx:
+            words = [sim.rd(a) for a in addrs]
+            if self.sink:
+                self.sink(x, ch, words)
+        else:
+            words = self.source(x, ch, c) if self.source else [0] * c
+            for a, v in zip(addrs, words):
+                sim.wr(a, v & M32)
+        self.blocks[(x, ch)] = self.blocks.get((x, ch), 0) + 1
+        self.cur[(x, ch)] = True
+        link = R.get(d + 3, 0)
+        if link >> 19 & 1:
+            reg, bit = self.IRQ[x]
+            sim.sreg['IRPTL' if reg == 'I' else 'LIRPTL'] |= 1 << bit
+        if not self.load(sim, d, link):
+            R[d + 2] = 0
+            self.cur.pop((x, ch), None)
+
+
 class Dpi:
     """DPI_IRPTL (IOP 0x1C32): read-only latch of DPI peripheral interrupts, cleared on read."""
     def rd(self, sim, a):
@@ -1444,6 +1546,7 @@ if __name__ == '__main__':
         sim.iop[base] = Spi(base)
     sim.iop[0x4400] = Twi()
     sim.iop[0x1C32] = Dpi()
+    sim.tickers.append(Sports())
     if a.trace:
         sim.trace = []
     try:

@@ -408,5 +408,23 @@ type 15b G-bit decode bug, not the firmware waiting.) Peripherals it uses during
   interrupt is not yet enabled. Whatever enables it must come from a main-loop service
   routine or from SPORT/timer activity.
 `Twi` and `Dpi` (DPI_IRPTL at 0x1C32, read-to-clear) in `sharc_sim.py` model this.
+
+Interrupts and the audio heartbeat [FW/VM]:
+- The vector address is 0x8C000 + 4 x *interrupt number*, not the latch bit. Numbers: IRPTL
+  bits 0..16 -> 0..16; LIRPTL P6I..P13I -> 17..24; IRPTL P14I..P16I (bits 17..19) -> 25..27;
+  LIRPTL P17I/P18I -> 28/29. The firmware's handler-registration routine (0x1313B4, table
+  at 0xB201A, 6 words per entry) uses these same numbers. It builds `BIT CLR LIRPTL x` /
+  `BIT CLR IRPTL y` instructions at 0x90748 at run time out of PX1/PX2 and calls them,
+  so PX must be modelled exactly (64-bit; PX2 = 63..32, PX1 = 31..0; a 48-bit memory
+  move uses PX[63:16]).
+- Init registers number 0x13 = P8I -> 0x1256F9 and 0x19 = P14I (DPI) -> 0x128BF6. P8I
+  defaults to SP4I, so **SPORT4 DMA completion is the DSP's audio heartbeat.**
+- All eight SPORTs run chained DMA. Each TCB is a self-loop: an 8-word block, modifier 1,
+  link with PCI set (interrupt every block). The chain pointer addresses the TCB's II word,
+  and the TCB is read downward (II, IM, C, CP). Buffers live at 0xB87AA..0xB8829 (8 words
+  each). SPCTL directions: SPORT1/2/6/7 transmit, SPORT0/3/4/5 receive [VM].
+- With `Sports` (one block every N instructions) the P8I handler runs repeatedly
+  (biquad cascades at 0x128842); between blocks the main loop wakes from IDLE, runs its
+  services and idles again. Speed is about 200k instructions/s in CPython.
 Next: SPIB slave-DMA + interrupt model, and a QEMU <-> Python co-simulation bridge (RSPI0
 bytes and the P3_8 / P7_6 / P7_7 handshake lines over a socket).

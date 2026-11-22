@@ -9,7 +9,8 @@ Tags: [FW] firmware static · [HW] radio · [VM] emulator · [EXT] outside · [I
   RSPI0 main-DSP handler `0x20202128`), so linking it needs the main DSP as well. **Main DSP = ADSP-21478 SHARC** (service manual IC202); boot-stream encoding solved
   (bit-reversed bytes, LE32, 2×48-bit per 3 words). `tools/sharc_dis.py` decodes kernel + VISA program; `tools/sharc_sim.py` runs the real
   firmware through its whole init (~500k instructions incl. heap, malloc, I2C codec set-up
-  at 0x18 via a TWI model) into its main loop, which IDLEs waiting for an interrupt [VM].
+  at 0x18 via a TWI model) into its main loop; with the SPORT chained-DMA model the SPORT4 (P8I) audio interrupt
+  runs its filter chain every block [VM].
   Next: SPIB slave-DMA + interrupt (ARM link on RSPI0), SPORT to DV DSP/codecs, then the
   QEMU <-> sim bridge.
 

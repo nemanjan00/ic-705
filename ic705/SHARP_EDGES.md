@@ -51,8 +51,11 @@ Symptom → cause → fix. Append the moment one bites.
   became `DM(3,I4)`, malloc's heap lookup returned 0 and the firmware called `exit()` —
   which looked like "idle waiting for the host". An IDLE stop is not proof of a wait;
   check how it was reached (here: via `exit` 0x1302FE). [VM]
-- **PX loads from 48-bit memory are 48-bit.** Treating them as 32-bit gives the wrong
-  heap base. [VM]
+- **PX is 64 bits: PX2 = 63..32, PX1 = 31..0, and 48-bit memory moves use PX[63:16].**
+  A 48-bit PX with a 16-bit PX1 mis-built the firmware's self-generated interrupt-mask
+  instructions, so LIRPTL stayed 0 and the DSP looked like it had nothing enabled. [VM]
+- **SHARC vectors go by interrupt number, not latch bit** (P14I is IRPTL bit 17 but
+  vector 0x64). Using the bit sent P14I to the P6I vector. [VM]
 - **Firmware divides by zero on purpose-free paths** (RECIPS 0 -> inf -> NaN -> FIX = all
   ones); a simulator that throws on NaN stops a firmware that runs fine on silicon. [VM]
 
