@@ -20,12 +20,19 @@ Tags: [FW] firmware static · [HW] radio · [VM] emulator · [EXT] outside · [I
     decimated by a 96-tap FIR.
   - TX takes the place of the USB MOD audio source and is interpolated back to 48 kHz.
   - Consequence: DMR through the current ICAP API is impractical.
+- **SHARC FM audio chain mapped [FW]** (`FM_AUDIO.md`).
+  - RX: a phase-difference discriminator, then an 8-section voice-band and
+    de-emphasis filter, then a selectable 200/300 Hz CTCSS high-pass, then ×20.
+  - TX: a 70 Hz high-pass, pre-emphasis (only for modes 0xB/0xC; other modes copy the
+    samples through), then a look-ahead limiter. Tones are added afterwards.
+  - The filters are table-driven biquads, so a flat RX path is a data-only patch;
+    TX also needs the limiter skipped. Responses assume 48 kHz [INF].
 - **Next:**
   1. Map the SSIF0/3/5 ports to their peers: which SHARC SPORT, the DV DSP's I2S0/I2S2,
      the AK4951 codecs.
-  2. Follow FM-mode audio through the SHARC. Does SSIF0 carry processed or raw audio?
-     This is the deciding question for ICAP-side DMR, and for R3/R4 in
-     `DMR_FEASIBILITY.md`.
+  2. Check the FM chain in `sharc_sim.py`: drive a known tone through the RX and TX
+     functions to confirm the 48 kHz rate and the gains. Then try the flat-table patch
+     in emulation.
   3. Then: the FIR accelerator model, deterministic version half-replies, speed.
 
 ## Milestones (newest first)
@@ -71,7 +78,8 @@ None. There has been no radio access; this is static analysis of `705E140.dat`
 - Audio wiring:
   - which ARM SSIF faces the SHARC, which faces the DV DSP (I2S0/I2S2) and which faces
     the codecs;
-  - what the SHARC does to FM RX and TX audio before those ports.
+  - where the SHARC's FM RX output block goes, and whether squelch reads it before or
+    after the filters.
 - Where the extra TX gain after the DV DSP comes from in DV mode (R3), and whether FM
   modes can provide ±1944 Hz.
 - What the FPGA does. It has no direct ARM link identified so far; the RSPI3 "status
@@ -91,3 +99,4 @@ None. There has been no radio access; this is static analysis of `705E140.dat`
 - SHARC loader, disassembler (48-bit + VISA) and whole-firmware simulator [FW]/[VM].
 - Full-radio QEMU with both DSPs on their own firmware [VM].
 - ICAP audio API and taps [FW].
+- SHARC FM RX/TX filter chain and biquad engine [FW].

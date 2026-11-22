@@ -9,6 +9,8 @@ Start with [`ic705/STATE.md`](ic705/STATE.md) (live state, resume point), then
 [`ic705/DMR_FEASIBILITY.md`](ic705/DMR_FEASIBILITY.md) (verdict). Emulation details
 are in [`ic705/EMULATION.md`](ic705/EMULATION.md). How SQ6EMM's ICAP app runtime taps
 audio, and what that means for DMR, is in [`ic705/ICAP.md`](ic705/ICAP.md).
+The main DSP's FM filter chain (and how to make it flat) is in
+[`ic705/FM_AUDIO.md`](ic705/FM_AUDIO.md).
 
 ## Hardware map
 

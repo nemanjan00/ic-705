@@ -33,8 +33,8 @@ app binaries in the release bundle. Nothing vendor-owned is copied here.
 
 So apps hear SSIF0-left, band-limited to below 4 kHz. That SSIF0's peer is the SHARC is
 [INF]; the SSIF-to-chip mapping is not traced yet (`ARCHITECTURE.md`).
-What processing is applied before that output (de-emphasis, filters, NR, AGC) has not been
-traced yet. The README's "turn NR off for APRS" note suggests the tap is
+The SHARC's FM receive chain applies de-emphasis, a 3 kHz voice low-pass and a CTCSS
+high-pass (`FM_AUDIO.md`); whether SSIF0 carries that output is still open. The README's "turn NR off for APRS" note suggests the tap is
 after NR [EXT].
 
 ## TX path [FW]
@@ -57,7 +57,7 @@ whatever the DSP's TX chain does to that input.
   under 4 kHz of bandwidth. 4FSK at ±1944 Hz deviation needs a flat response down to near
   DC, and the FM audio chain's high-pass and de-emphasis remove it.
 - The hook points already carry 48 kHz audio (before the decimator, after the
-  interpolator). A 48 kHz API is a small runtime change. The real blocker is what the
-  SHARC does to SSIF0 RX and TX audio in FM mode. That is the next thing to trace, in
-  `sharc_sim.py` with the SPORT model (which SPORT faces SSIF0, and which filters sit
-  between the FM demodulator or modulator and that SPORT).
+  interpolator). A 48 kHz API is a small runtime change. The real blocker is the
+  SHARC's FM filtering: de-emphasis/pre-emphasis, the CTCSS high-pass and the limiter.
+  It is mapped in `FM_AUDIO.md` and can be flattened with a table patch, plus a small
+  code patch for the limiter [INF].

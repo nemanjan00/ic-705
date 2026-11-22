@@ -110,9 +110,9 @@ RF → [FPGA/main DSP] → discriminator → I2S0 L (48 kHz) → DV DSP: RRC mat
 3. **[FW]/[VM] Host protocol:** the RSPI0 ↔ McSPI packet framing is known and runs in
    emulation. Still to decode: the packet types for D-STAR voice/data, which a DMR payload
    would reuse.
-4. **[FW]/[VM] Audio path through the SHARC:** which SPORT feeds the DV DSP's I2S0 and
-   the ARM's SSIF0, and what filtering sits between the demodulator/modulator and them.
-   This decides R3/R4 and whether an ICAP-side modem can work.
+4. **[FW]/[VM] Audio path through the SHARC:** the FM filter chain is mapped
+   (`FM_AUDIO.md`). It is table-driven and can be flattened. Still open: which SPORT
+   feeds the DV DSP's I2S0 and the ARM's SSIF0, and a simulator check of the patch.
 5. ~~C55x micro-emulator~~ and ~~DSP-group re-seal~~: done (`POC.md`).
 
 ## Fallback: flat data path
