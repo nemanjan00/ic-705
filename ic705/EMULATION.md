@@ -269,12 +269,16 @@ UI language is Japanese (factory default: the settings EEPROM is blank).
     the 0x600-byte kernel is SHARC code: runs of `0x0Fxx` "Ureg = imm32" loads, 36
     jump/call-class words and RTS (0x0A3E00000000) ×2, versus 0 under every other layout.
     The first word is 0xA5.
-    Stream structure (`tools/sharc_ldr.py`): 256-instruction kernel, then 191 ADI loader
-    blocks: 95 INIT_L32 + 94 ZERO_LDATA (data at 0xB2000..0xB9D3E), a single INIT_L48 of
-    five instructions at 0x8C100, then FINAL_INIT, about 34 KB in. The rest of region 1
-    does not parse as loader blocks, so the main program presumably comes in a later,
-    custom stage (the five-instruction stub, the remaining stream, and/or region 2 with its
-    offset/length table) [INF]. Lesson: a negative ISA signature test means little until the
+    Stream structure (`tools/sharc_ldr.py`): 256-instruction kernel, then 231 standard
+    ADI loader blocks consuming region 1 exactly (36,087 words, ending at byte 0x233E4):
+    INIT_L32 ×95 (data 0xB2000..0xB9D3E), ZERO_LDATA ×113, INIT_L16 ×19 (0xD22B 16-bit
+    parcels at short-word 0x124354..0x1315D3), INIT_L48 ×2 (12 instructions), ZERO_L48 ×1,
+    and FINAL_INIT (256 instructions over the kernel: the interrupt vector table, each vector
+    `PUSH STS; JUMP 0x8C0B7 (DB); DM(I7,M7) = R2; R2 = <handler>`). INIT_L48 needs 3 words
+    per *pair* of instructions (rounded up) — getting that wrong misaligned everything after
+    it. The main program is the INIT_L16 payload: **VISA** code (16/32/48-bit compressed
+    instructions in short-word space), so the decoder needs the VISA forms too.
+    Lesson: a negative ISA signature test means little until the
     container encoding (bit order, word size, packing) is known.
 - **Input:** touch/keys path not identified yet (not on I2C: RIIC0=EEPROM 0x53,
   RIIC1=0x6B/0x35; most likely via the sub-CPU status frame).

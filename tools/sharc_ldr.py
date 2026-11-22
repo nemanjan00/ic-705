@@ -39,7 +39,8 @@ def blocks(ws, i=384):
     while i < len(ws) - 3:
         tag, cnt, addr = ws[i] & 0xFF, ws[i + 1], ws[i + 2]
         i += 3
-        n = {1: 0, 2: 0, 3: (cnt + 1) // 2, 4: cnt, 5: (cnt * 3 + 1) // 2, 6: cnt * 2}.get(tag)
+        # INIT_L48: the kernel fetches 3 words per pair of instructions, rounding up
+        n = {1: 0, 2: 0, 3: (cnt + 1) // 2, 4: cnt, 5: (cnt + 1) // 2 * 3, 6: cnt * 2}.get(tag)
         if tag == 0:
             yield tag, cnt, addr, ws[i:i + 384]
             return
