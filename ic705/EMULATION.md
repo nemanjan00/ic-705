@@ -173,11 +173,21 @@ and 3; layout tag "SX4075 V4.51-E00" at 0x3FE40 (image builder `0x20065420`). Mo
   every tick, ch2/ch3 never (gated by bit 5 of config byte `0x20380BD2`, set per power-source
   mode); IRQRR polled every tick (RTC).
 
-**Touch: still not located.** Ruled out: sub-CPU (no I2C, its EXTI ISR is only the ARM link,
-ADC ch2/3/10 used only in the init conversion), both I2C buses, RSPI0/1/3/4, SCIF1/2/4/5,
-USB, external IRQ pins (only IRQ0 RTC, IRQ2 CI-V). Remaining guesses: ARM ADC ch2/ch3 when
-`0x20380BD2` bit 5 is set (resistive panel driven by the pins `0x201183B0` switches), or the
-FPGA status words.
+**Touch panel [FW]/[VM]:** a TSC2046/ADS7843-class serial touch ADC bit-banged on port 3.
+P3_10 /CS, P3_4 DCLK, P3_5 DIN, P3_6 DOUT, P3_11 BUSY, P3_12 /PENIRQ. Pen poll `0x2008D830`
+(PPR3 bit 12, release after 25 ticks) sets an RTX event for task `0x2008F5C4`, which reads
+X then Y through `0x2008E524`. Command bits come from DMAC ch2 waveforms (`0x202E55BC`,
+48 bytes each, into PSR3, completion DMAINT2 → `0x2008CF34`); the tail of the command, the
+BUSY handshake and the 12 data bits are clocked by hand. Commands 0xD0 = X and 0x90 = Y.
+Results at `0x203DA4E0` (state, X, Y); calibrated pixels in the front-panel block
+`0x203E1F1B` (+8 tag 0 = pixels, +9/+11 X/Y BE16), read by the getter `0x20108634` (9999 when
+no touch, same as the IC-7300's). Default calibration (blank EEPROM), measured: raw 500/3500 →
+X 443/52 px, Y 259/12 px. Modelled in `rz_a1h.c` (`touch` machine property, raw "X,Y" or
+"" = up); DMAC ch1–7 got a generic path for transfers to/from the GPIO block (`dmac.c`).
+
+**Window input [VM]:** in the GTK window, the mouse is the touch panel (pixel → raw with the
+calibration above), the wheel and Left/Right are the main dial, M/F/S/Q/X(Esc)/K/A/R/L/U/D/1/2/3
+are the ladder keys (held while held), and P is POWER.
 
 **Factory block 0xFC0000 [FW]:** `0x20090FA4` checks the tag "ICOM INC 2019.12" at
 `0x18FFFFF0`, a 512-byte header at `0x18FE3F50`, and a byte sum over 0x3FC00 bytes at

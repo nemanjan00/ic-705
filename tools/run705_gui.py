@@ -11,7 +11,8 @@ Boot is the real power-on path (ic705/EMULATION.md):
   - DSP/FPGA SPI flash on RSPI4 = decoded DSP group (DSPs/FPGA not emulated)
   - settings EEPROM image: --eeprom (default ~/icom/out/705_eeprom.bin)
 
-Controls (terminal must have focus; keys go through the real sub-CPU ladder ADC path or the
+Controls: the GTK window itself takes mouse = touch, wheel = dial, and the same letter keys
+(see EMULATION.md "Window input"). From this terminal (it must have focus; keys go through the real sub-CPU ladder ADC path or the
 MTU2 phase counter, see EMULATION.md "Front-panel keys"):
   m MENU   f FUNCTION   q QUICK   x/Esc EXIT   s M.SCOPE   k MULTI push   a AF/RF push
   l SPEECH/LOCK (hold 2 s)   u / d  UP / DOWN (hold 1 s)   r ch0-L3 (RIT-type key)

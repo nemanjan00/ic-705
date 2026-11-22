@@ -84,6 +84,81 @@ index bf2411b..2ade9c9 100644
      memcpy(&s->regs[offset], &value, size);
  }
  
+diff --git a/qemu-machine/src/dmac.c b/qemu-machine/src/dmac.c
+index e85ce07..9ca2817 100644
+--- a/qemu-machine/src/dmac.c
++++ b/qemu-machine/src/dmac.c
+@@ -177,6 +177,7 @@ struct RZA1HDmacState {
+     bool stream_running;        /* stream_timer is running */
+     uint8_t stream_set[RZA1H_DMAC_CHANNELS];   /* register set the next completion uses */
+     uint32_t chstat[RZA1H_DMAC_CHANNELS];      /* ch1-7 CHSTAT (EN, END, SR) */
++    QEMUTimer *gen_timer[RZA1H_DMAC_CHANNELS]; /* IC-705 generic block transfers */
+     uint64_t stream_blocks[RZA1H_DMAC_CHANNELS];
+     uint64_t stream_overruns[RZA1H_DMAC_CHANNELS]; /* END still set at the next block */
+     uint8_t sdhi_armed;         /* SETEN'd channels with SDHI0 on one side */
+@@ -448,6 +449,20 @@ static void rza1h_dmac_sdhi_dreq(void *opaque, int n, int level)
+     }
+ }
+ 
++static RZA1HDmacState *dmac_gen_owner;
++
++static void rza1h_dmac_gen_done(void *opaque)
++{
++    int ch = (intptr_t)opaque;
++    RZA1HDmacState *s = dmac_gen_owner;
++    hwaddr base = ch * DMAC_CH_STRIDE;
++
++    s->chstat[ch] = DMAC_CHSTAT_END;
++    if (!(dmac_reg32(s, base + DMAC_CHCFG_0) & DMAC_CHCFG_DEM)) {
++        qemu_irq_pulse(s->irq[ch]);
++    }
++}
++
+ static void rza1h_dmac_seten(RZA1HDmacState *s, int ch)
+ {
+     hwaddr base = ch * DMAC_CH_STRIDE;
+@@ -476,6 +491,30 @@ static void rza1h_dmac_seten(RZA1HDmacState *s, int ch)
+         rza1h_dmac_sdhi_move(s);
+         return;
+     }
++    if (rza1h_board_ic705() && ((dst >= 0xFCFE3000 && dst < 0xFCFE4000) ||
++                                 (src >= 0xFCFE3000 && src < 0xFCFE4000))) {
++        /* IC-705: generic block transfer to/from the GPIO block (ch2 plays the touch-controller command
++         * waveform into PSR3, FW 0x2008CECC; completion ISR 0x2008CF34 on DMAINT2). All
++         * units are moved at once; END + DMAINT follow 1 us per unit later. */
++        uint32_t cfg = dmac_reg32(s, base + DMAC_CHCFG_0);
++        static const int sz[8] = { 1, 2, 4, 8, 16, 32, 64, 128 };
++        int unit = sz[(cfg >> 16) & 7];
++        uint8_t buf[128];
++
++        for (uint32_t off = 0; off < count; off += unit) {
++            int u = MIN((uint32_t)unit, count - off);
++            address_space_read(&address_space_memory, src + ((cfg & DMAC_CHCFG_SAD) ? 0 : off),
++                               MEMTXATTRS_UNSPECIFIED, buf, u);
++            address_space_write(&address_space_memory, dst + ((cfg & DMAC_CHCFG_DAD) ? 0 : off),
++                                MEMTXATTRS_UNSPECIFIED, buf, u);
++        }
++        s->chstat[ch] = DMAC_CHSTAT_EN;
++        rza1h_debug("dmac", "ch%d generic: src=%#x dst=%#x count=%u cfg=%#x", ch, src, dst,
++                    count, cfg);
++        timer_mod(s->gen_timer[ch], qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
++                  (int64_t)(count / unit + 1) * 1000);
++        return;
++    }
+     if (src != RZA1H_RSPI2_SPDR && dst != RZA1H_RSPI2_SPDR) {
+         rza1h_debug("dmac", "ch%d SETEN ignored (src=%#x dst=%#x count=%u): "
+                    "not an RSPI2 transfer", ch, src, dst, count);
+@@ -566,7 +605,10 @@ static void rza1h_dmac_init(Object *obj)
+     sysbus_init_irq(sbd, &s->irq0);
+     for (int ch = 1; ch < RZA1H_DMAC_CHANNELS; ch++) {
+         sysbus_init_irq(sbd, &s->irq[ch]);   /* sysbus IRQ index ch */
++        s->gen_timer[ch] = timer_new_ns(QEMU_CLOCK_VIRTUAL, rza1h_dmac_gen_done,
++                                        (void *)(intptr_t)ch);
+     }
++    dmac_gen_owner = s;
+     qdev_init_gpio_in_named(DEVICE(obj), rza1h_dmac_sdhi_dreq, "sdhi-dreq", 1);
+ }
+ 
 diff --git a/qemu-machine/src/dmac_hi.c b/qemu-machine/src/dmac_hi.c
 new file mode 100644
 index 0000000..9dfd6d9
@@ -294,7 +369,7 @@ index 0000000..9dfd6d9
 +
 +type_init(dh_register)
 diff --git a/qemu-machine/src/gpio.c b/qemu-machine/src/gpio.c
-index 908927a..fe87611 100644
+index 908927a..80d6054 100644
 --- a/qemu-machine/src/gpio.c
 +++ b/qemu-machine/src/gpio.c
 @@ -364,6 +364,8 @@ static void rza1h_gpio_write(void *opaque, hwaddr offset, uint64_t value,
@@ -342,7 +417,7 @@ index 908927a..fe87611 100644
  static void rza1h_gpio_reset(DeviceState *dev)
  {
      RZA1HGpioState *s = RZA1H_GPIO(dev);
-@@ -477,12 +501,76 @@ static void rza1h_gpio_reset(DeviceState *dev)
+@@ -477,12 +501,77 @@ static void rza1h_gpio_reset(DeviceState *dev)
       * P8_9/P1_7 above. See rza1h_gpio_set_civ_bus_busy() for how to simulate it going busy. */
      s->pin_level[7] |= 0x800;
  
@@ -350,6 +425,7 @@ index 908927a..fe87611 100644
 +        /* IC-705 idle input levels (pull-ups): P3_9 = POWER key, released high [FW];
 +         * P7_9 = sub-CPU ready, high while no request is pending [FW 0x20120960] */
 +        s->pin_level[3] |= 1u << 9;
++        s->pin_level[3] |= 1u << 12;   /* IC-705 touch /PENIRQ idle high (rz_a1h.c TSC2046) */
 +        s->pin_level[7] |= 1u << 9;
 +    }
 +    rza1h_gpio_apply_pins(s, getenv("RZA1H_PINS"));
@@ -419,7 +495,7 @@ index 908927a..fe87611 100644
  /* Live PWRK press/release for testing (2026-09-20) -- not a real hardware input this project
   * has any other way to drive, and this project's own PPR write handler correctly ignores guest
   * writes (PPR is real-hardware read-only), so a host-side QOM property is the only way to
-@@ -579,6 +667,7 @@ static void rza1h_gpio_init(Object *obj)
+@@ -579,6 +668,7 @@ static void rza1h_gpio_init(Object *obj)
                               rza1h_gpio_set_pwrk_pressed);
      object_property_add_bool(obj, "civ-bus-busy", rza1h_gpio_get_civ_bus_busy,
                               rza1h_gpio_set_civ_bus_busy);
@@ -1277,7 +1353,7 @@ index 0000000..7304927
 +
 +type_init(rg_register)
 diff --git a/qemu-machine/src/rz_a1h.c b/qemu-machine/src/rz_a1h.c
-index 2342e9e..692e565 100644
+index 2342e9e..9278f73 100644
 --- a/qemu-machine/src/rz_a1h.c
 +++ b/qemu-machine/src/rz_a1h.c
 @@ -27,6 +27,8 @@
@@ -1289,16 +1365,18 @@ index 2342e9e..692e565 100644
  #include "hw/core/boards.h"
  #include "hw/core/cpu.h"
  #include "hw/core/loader.h"
-@@ -45,6 +47,8 @@
+@@ -45,6 +47,10 @@
  #include "target/arm/cpu-qom.h"
  
  #include "rz_a1h.h"
++#include "ui/input.h"
++#include "standard-headers/linux/input-event-codes.h"
 +#include "rza1h_debug.h"
 +#include "stm32l0.h"
  
  /* Every I/O region notes/memory-map.md documents, mirroring
   * emu/board.py's IO_REGIONS list exactly (same names, same comments on
-@@ -96,12 +100,120 @@ static void add_plain_ram_region(MemoryRegion *sysmem, const char *name,
+@@ -96,12 +102,291 @@ static void add_plain_ram_region(MemoryRegion *sysmem, const char *name,
      memory_region_add_subregion_overlap(sysmem, base, mr, 0);
  }
  
@@ -1367,8 +1445,179 @@ index 2342e9e..692e565 100644
 + * from STOP) [ARM 0x20120960, sub 0x080039EC];
 + * RZ P5_3 (ARM receive request, active low) -> sub-CPU PB5 [ARM 0x20120C20 PSR5,
 + * sub 0x08003F48] */
++/* IC-705 touch panel: TSC2046/ADS7843-class serial touch ADC, bit-banged on port 3
++ * [FW: task 0x2008F5C4, transfer 0x2008E524, waveforms 0x202E55BC, pen poll 0x2008D830]:
++ * P3_10 /CS, P3_4 DCLK, P3_5 DIN (out), P3_6 DOUT (in), P3_11 BUSY (in), P3_12 /PENIRQ (in).
++ * Commands 0xD0 (X) and 0x90 (Y), 12-bit. BUSY rises after the 8th DCLK falling edge and
++ * drops after the 9th; data MSB first from then on, shifted on falling edges. */
++static struct {
++    bool cs, clk, din, down;
++    int n;
++    uint8_t cmd;
++    uint16_t x, y, sh;
++} ic705_tsc = { .cs = true };
++
++static void ic705_tsc_set_dout(void)
++{
++    rza1h_gpio_set_input(ic705_gpio, 3, 6, (ic705_tsc.sh >> 11) & 1);
++}
++
++static void ic705_tsc_pin(int bit, int level)
++{
++    if (bit == 10) {
++        ic705_tsc.cs = level;
++        ic705_tsc.n = 0;
++        ic705_tsc.cmd = 0;
++        rza1h_gpio_set_input(ic705_gpio, 3, 11, 0);
++        return;
++    }
++    if (bit == 5) {
++        ic705_tsc.din = level;
++        return;
++    }
++    if (bit != 4 || ic705_tsc.cs || level == ic705_tsc.clk) {
++        ic705_tsc.clk = (bit == 4) ? level : ic705_tsc.clk;
++        return;
++    }
++    ic705_tsc.clk = level;
++    if (level) {                                    /* rising edge: sample DIN */
++        if (++ic705_tsc.n <= 8) {
++            ic705_tsc.cmd = (ic705_tsc.cmd << 1) | ic705_tsc.din;
++        }
++        return;
++    }
++    if (ic705_tsc.n == 8) {                         /* falling edge */
++        int a = (ic705_tsc.cmd >> 4) & 7;
++        uint16_t v = !ic705_tsc.down ? 0 : a == 5 ? ic705_tsc.x : a == 1 ? ic705_tsc.y : 0;
++        ic705_tsc.sh = v & 0xFFF;
++        rza1h_gpio_set_input(ic705_gpio, 3, 11, 1);
++        rza1h_debug("tsc", "cmd %02x -> %03x", ic705_tsc.cmd, ic705_tsc.sh);
++    } else if (ic705_tsc.n == 9) {
++        rza1h_gpio_set_input(ic705_gpio, 3, 11, 0);
++        ic705_tsc_set_dout();
++    } else if (ic705_tsc.n > 9) {
++        ic705_tsc.sh <<= 1;
++        ic705_tsc_set_dout();
++    }
++}
++
++/* QOM machine property "touch": "X,Y" (raw 12-bit panel values) = pen down, "" = up. */
++static void ic705_set_touch(Object *obj, const char *str, Error **errp)
++{
++    unsigned x, y;
++    if (str && sscanf(str, "%u,%u", &x, &y) == 2) {
++        ic705_tsc.x = x & 0xFFF;
++        ic705_tsc.y = y & 0xFFF;
++        ic705_tsc.down = true;
++    } else {
++        ic705_tsc.down = false;
++    }
++    rza1h_gpio_set_input(ic705_gpio, 3, 12, !ic705_tsc.down);
++    rza1h_debug("tsc", "touch %s", ic705_tsc.down ? str : "up");
++}
++
++static char *ic705_get_touch(Object *obj, Error **errp)
++{
++    return ic705_tsc.down ? g_strdup_printf("%u,%u", ic705_tsc.x, ic705_tsc.y) : g_strdup("");
++}
++
++/* IC-705 window input (GTK console): mouse = touch panel, wheel/arrows = main dial, keys =
++ * front-panel ladder keys through the sub-CPU ADC (held while held), P = POWER.
++ * Pixel -> raw panel value uses the firmware's default calibration, measured in the VM:
++ * raw 500/3500 -> X 443/52 px, Y 259/12 px (both axes inverted). */
++static int ic705_mouse_x, ic705_mouse_y;
++static bool ic705_mouse_down;
++static void ic705_pin_hook(int port, int bit, int level);
++
++static void ic705_touch_update(void)
++{
++    char buf[32];
++    if (ic705_mouse_down) {
++        int rx = 500 + (int)((443 - ic705_mouse_x) / 0.130333);
++        int ry = 500 + (int)((259 - ic705_mouse_y) / 0.082167);
++        snprintf(buf, sizeof(buf), "%d,%d", MIN(MAX(rx, 0), 4095), MIN(MAX(ry, 0), 4095));
++        ic705_set_touch(NULL, buf, NULL);
++    } else {
++        ic705_set_touch(NULL, "", NULL);
++    }
++}
++
++typedef struct { unsigned code; int8_t ch, level; } Ic705Key;
++static const Ic705Key ic705_keys[] = {
++    { KEY_M, 1, 1 }, { KEY_F, 14, 1 }, { KEY_S, 14, 2 }, { KEY_Q, 14, 3 },
++    { KEY_X, 14, 4 }, { KEY_ESC, 14, 4 }, { KEY_K, 0, 2 }, { KEY_A, 1, 2 },
++    { KEY_R, 0, 3 }, { KEY_L, 15, 1 }, { KEY_U, 15, 3 }, { KEY_D, 15, 4 },
++    { KEY_1, 0, 1 }, { KEY_2, 1, 3 }, { KEY_3, 1, 4 },
++};
++static const uint16_t ic705_ladder[5] = { 0xFFF, 0x0C0, 0x400, 0x800, 0xC00 };
++
++static void ic705_dial(int n)
++{
++    Object *m = object_resolve_path("/machine/mtu2", NULL);
++    if (m) {
++        object_property_set_int(m, "dial", n, NULL);
++    }
++}
++
++static void ic705_input_event(DeviceState *dev, QemuConsole *src, QemuInputEvent *evt)
++{
++    if (evt->type == INPUT_EVENT_KIND_ABS) {
++        int *v = evt->abs.axis == INPUT_AXIS_X ? &ic705_mouse_x : &ic705_mouse_y;
++        *v = qemu_input_scale_axis(evt->abs.value, INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX,
++                                   0, evt->abs.axis == INPUT_AXIS_X ? 479 : 271);
++        if (ic705_mouse_down) {
++            ic705_touch_update();
++        }
++    } else if (evt->type == INPUT_EVENT_KIND_BTN) {
++        InputButton b = evt->btn.button;
++        if (b == INPUT_BUTTON_LEFT) {
++            ic705_mouse_down = evt->btn.down;
++            ic705_touch_update();
++        } else if ((b == INPUT_BUTTON_WHEEL_UP || b == INPUT_BUTTON_WHEEL_DOWN) && evt->btn.down) {
++            ic705_dial(b == INPUT_BUTTON_WHEEL_UP ? 5 : -5);
++        }
++    } else if (evt->type == INPUT_EVENT_KIND_KEY) {
++        unsigned code = evt->key.key;
++        bool down = evt->key.down;
++        if (code == KEY_LEFT || code == KEY_RIGHT) {
++            if (down) {
++                ic705_dial(code == KEY_RIGHT ? 1 : -1);
++            }
++            return;
++        }
++        if (code == KEY_P) {
++            rza1h_gpio_set_input(ic705_gpio, 3, 9, !down);
++            ic705_pin_hook(3, 9, !down);
++            return;
++        }
++        for (size_t i = 0; ic705_sub && i < ARRAY_SIZE(ic705_keys); i++) {
++            if (ic705_keys[i].code == code) {
++                stm32l0_set_adc(ic705_sub, ic705_keys[i].ch,
++                                ic705_ladder[down ? ic705_keys[i].level : 0]);
++                return;
++            }
++        }
++    }
++}
++
++static const QemuInputHandler ic705_input_handler = {
++    .name  = "IC-705 front panel",
++    .mask  = INPUT_EVENT_MASK_BTN | INPUT_EVENT_MASK_ABS | INPUT_EVENT_MASK_KEY,
++    .event = ic705_input_event,
++};
++
 +static void ic705_out_hook(int port, int bit, int level)
 +{
++    if (port == 3 && (bit == 4 || bit == 5 || bit == 10)) {
++        ic705_tsc_pin(bit, level);
++        return;
++    }
++    if (!ic705_sub) {
++        if (port == 7 && bit == 11) {              /* behavioural sub: ack follows request */
++            rza1h_gpio_set_input(ic705_gpio, 7, 9, level);
++        }
++        return;
++    }
 +    if ((port == 7 && bit == 11) || (port == 5 && bit == 3)) {
 +        rza1h_debug("sub", "ARM P%d_%d -> %d", port, bit, level);
 +    }
@@ -1419,7 +1668,7 @@ index 2342e9e..692e565 100644
      /* Real hardware's boot-mode-3 SPI-flash XIP entry point -- confirmed
       * ground truth, see notes/base-loader.md and RZA1H_FLASH_BASE's own
       * comment in rz_a1h.h. */
-@@ -125,6 +237,7 @@ static void rza1h_init(MachineState *machine)
+@@ -125,6 +410,7 @@ static void rza1h_init(MachineState *machine)
      DeviceState *openvg;
      DeviceState *adc;
      DeviceState *vdc5;
@@ -1427,7 +1676,7 @@ index 2342e9e..692e565 100644
      size_t i;
      int ch;
  
-@@ -331,6 +444,23 @@ static void rza1h_init(MachineState *machine)
+@@ -331,6 +617,23 @@ static void rza1h_init(MachineState *machine)
       * ring has drained, so its "ring now empty" flag-clear (main_idle_
       * loop's own entry-wait gate, 0x203906ed) never runs even once the
       * ring genuinely is empty. See mtu2.c's own comment. */
@@ -1451,7 +1700,7 @@ index 2342e9e..692e565 100644
      mtu2 = qdev_new(TYPE_RZA1H_MTU2);
      sysbus_realize_and_unref(SYS_BUS_DEVICE(mtu2), &error_fatal);
      sysbus_mmio_map_overlap(SYS_BUS_DEVICE(mtu2), 0, RZA1H_MTU2_BASE, 0);
-@@ -352,6 +482,7 @@ static void rza1h_init(MachineState *machine)
+@@ -352,6 +655,7 @@ static void rza1h_init(MachineState *machine)
      sysbus_connect_irq(SYS_BUS_DEVICE(mtu2), 5,
                         qdev_get_gpio_in(gic,
                             RZA1H_MTU2_TGI1A_IRQ - RZA1H_GIC_NUM_INTERNAL));
@@ -1459,7 +1708,7 @@ index 2342e9e..692e565 100644
  
      /* riic.c -- upgraded from a bare RAM region to a real device,
       * 2026-09-08 second pass, once body.bin's own cold-boot RIIC2 read
-@@ -394,6 +525,9 @@ static void rza1h_init(MachineState *machine)
+@@ -394,6 +698,9 @@ static void rza1h_init(MachineState *machine)
          sysbus_realize_and_unref(SYS_BUS_DEVICE(scif), &error_fatal);
          sysbus_mmio_map_overlap(SYS_BUS_DEVICE(scif), 0,
                                  RZA1H_SCIF0_BASE + i * RZA1H_SCIF_STRIDE, 0);
@@ -1469,7 +1718,7 @@ index 2342e9e..692e565 100644
          sysbus_connect_irq(SYS_BUS_DEVICE(scif), 0,
                             qdev_get_gpio_in(gic,
                                 RZA1H_SCIF_TXI_BASE0 + i * RZA1H_SCIF_TXI_STRIDE
-@@ -407,7 +541,7 @@ static void rza1h_init(MachineState *machine)
+@@ -407,7 +714,7 @@ static void rza1h_init(MachineState *machine)
           * channel leaves it created but unmapped, a normal, inert QEMU
           * idiom (rza1h_scif_init's own comment explains why it can't be
           * skipped at creation time instead). */
@@ -1478,7 +1727,7 @@ index 2342e9e..692e565 100644
              sysbus_mmio_map_overlap(SYS_BUS_DEVICE(scif), 1,
                                      RZA1H_SCIF5_DSP_RETRY_ARM_BASE, 0);
          }
-@@ -437,6 +571,17 @@ static void rza1h_init(MachineState *machine)
+@@ -437,6 +744,17 @@ static void rza1h_init(MachineState *machine)
                                                   RZA1H_GIC_NUM_INTERNAL));
      }
  
@@ -1496,7 +1745,7 @@ index 2342e9e..692e565 100644
      /* sdhi.c -- the SD slot body.bin actually drives (not MMCIF, see sdhi.c).
       * The card is upstream's sd-card, backed by `-drive if=sd`; without one
       * the slot is empty. Overlap-mapped inside "io-e8030000". */
-@@ -468,6 +613,19 @@ static void rza1h_init(MachineState *machine)
+@@ -468,6 +786,19 @@ static void rza1h_init(MachineState *machine)
       * comment). Overlap-mapped: sits inside the broader "io-e8000000"
       * unimplemented-device catch-all above. SPRI2 wired 2026-09-24 for the
       * fake FPGA's sweep reads, see rspi2.c's own comment. */
@@ -1516,7 +1765,7 @@ index 2342e9e..692e565 100644
      rspi2 = qdev_new(TYPE_RZA1H_RSPI2);
      sysbus_realize_and_unref(SYS_BUS_DEVICE(rspi2), &error_fatal);
      sysbus_mmio_map_overlap(SYS_BUS_DEVICE(rspi2), 0, RZA1H_RSPI2_BASE, 0);
-@@ -475,6 +633,7 @@ static void rza1h_init(MachineState *machine)
+@@ -475,6 +806,7 @@ static void rza1h_init(MachineState *machine)
                         qdev_get_gpio_in(gic, RZA1H_RSPI2_SPRI_IRQ -
                                               RZA1H_GIC_NUM_INTERNAL));
  
@@ -1524,10 +1773,18 @@ index 2342e9e..692e565 100644
      /* ssif.c -- SSIF0/1, the CPU end of the DSP audio link (2026-09-24, see ssif.c).
       * Overlap-mapped inside "io-e8200000"; no IRQs (the firmware polls DMAC CHSTAT). */
      {
-@@ -514,15 +673,39 @@ static void rza1h_init(MachineState *machine)
+@@ -514,15 +846,47 @@ static void rza1h_init(MachineState *machine)
      sysbus_realize_and_unref(SYS_BUS_DEVICE(adc), &error_fatal);
      sysbus_mmio_map_overlap(SYS_BUS_DEVICE(adc), 0, RZA1H_ADC_BASE, 1);
  
++    if (rza1h_board_ic705()) {
++        ic705_gpio = gpio;
++        rza1h_gpio_out_hook = ic705_out_hook;
++        rza1h_gpio_set_input(gpio, 3, 12, 1);              /* no touch */
++        object_property_add_str(OBJECT(machine), "touch", ic705_get_touch, ic705_set_touch);
++        qemu_input_handler_activate(qemu_input_handler_register(gpio, &ic705_input_handler));
++    }
++
 +    /* IC-705 sub-CPU: STM32L0 running its own firmware (aux2), USART1 <-> SCIF3 */
 +    if (rza1h_board_ic705() && getenv("RZA1H_SUBCPU_FW")) {
 +        DeviceState *sub = qdev_new(TYPE_STM32L0);

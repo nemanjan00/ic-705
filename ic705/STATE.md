@@ -15,7 +15,7 @@ Tags: [FW] firmware static · [HW] radio · [VM] emulator · [EXT] outside · [I
 - **2026-11-22 (later): owner chose input/peripherals before DSPs.** Keys work end to end
   (sub ADC ladders); settings EEPROM modelled (RIIC0 0x50..0x53, 256 KiB); charger-sense
   default fixed. Key map and main dial done (EMULATION.md); `tools/run705_gui.py` drives keys/dial/POWER
-  from the terminal. **Next: touch.** Ruled out: sub-CPU (no I2C; ADC ch2/3/10 only in the
+  from the terminal. **Touch done** (TSC2046 on port 3; mouse in the GTK window). Previously: Ruled out: sub-CPU (no I2C; ADC ch2/3/10 only in the
   init conversion), RIIC0 (EEPROM), RIIC1 0x6B (codec-like), RSPI0/1/3/4, SCIF1/4, GIC pin
   IRQs (none registered). Open leads: FPGA register pages polled over RSPI3 (`E0 00 00 0N`
   + 17× reg 0 reads), GIC 302–304 handler `0x2012642C`, SSIF3 status polling.
