@@ -127,12 +127,23 @@ real discriminator (a jig/ladder level on that channel) [INF].
 ch14/ch15, step 5 0x3F0, step 10 0xC3F3; 10-bit mode). The 8-bit value (ADC bits 9:2) is
 classified with thresholds the ARM sends to sub RAM `0x200001BE` (E6 CC B9 8D 74 48 35 19):
 ≥0xE6 open; 0xB9–0xCC level 4; 0x74–0x8D level 3; 0x35–0x48 level 2; ≤0x19 level 1; anything
-else ignored. Ladder → key-word bits: ch0 L2/L3/L4 = 0x1/0x2/0x4; ch1 L1..L4 = 0x8..0x40;
+else ignored. Ladder → key-word bits: ch0 L1/L2/L3 = 0x1/0x2/0x4; ch1 L1..L4 = 0x8..0x40;
 ch14 = 0x80..0x400; ch15 = 0x800..0x4000 (`0x2000011C`, debounced twice, sent to the ARM,
 seen at ARM `0x203E1F1C`). Press from QMP: `qom-set /machine/subcpu adc "0=0x0c0"` (12-bit
 level values ≈ L1 0x0C0, L2 0x400, L3 0x800, L4 0xC00; release = 0xFFF). The old model's
 0x800 on every channel read as four held keys (key word 0x0889), which together with ARM
 ADC ch6 was what opened adjust mode.
+
+**Key map [VM]** (short tap unless noted; names inferred from the screen each opens):
+ch1 L1 MENU · ch14 L1 FUNCTION · ch14 L2 M.SCOPE · ch14 L3 QUICK · ch14 L4 EXIT ·
+ch0 L2 MULTI push (RF POWER/MIC GAIN/COMP/MONITOR) · ch1 L2 AF/RF push (RF GAIN/SQL) ·
+ch0 L3 toggles RIT · ch15 L1 held = dial lock (SPEECH/LOCK) · ch15 L3/L4 held = frequency
+steps (UP/DOWN-type) · ch0 L1, ch1 L3, ch1 L4 not identified yet.
+
+**Main dial [FW]/[VM]:** MTU2 channel 1 in phase-counting mode 1 (TMDR_1 = 0x04, TSTR CST1),
+10 Hz per count in the default step. The old timer model free-ran TCNT1, which looked like the
+dial spinning (frequency drifting by itself). `mtu2g.c` now freezes phase-counting channels
+and takes encoder counts from QOM `/machine/mtu2` `dial` (signed int).
 
 **Sub-CPU analog sense [FW]/[VM]:** ch4..9 are reported to the ARM on request (sub
 `0x8003BD4`, 10-bit, split 3+7 bits). Any level on **ch4** keeps the ARM out of deep standby
@@ -208,7 +219,7 @@ UI language is Japanese (factory default: the settings EEPROM is blank).
 
 ```sh
 python3 tools/build_705_flash.py 705E140.dat ~/icom/out/705_flash.bin
-python3 tools/run705_gui.py                 # GTK window, real power-on, real sub-CPU
+python3 tools/run705_gui.py                 # GTK window + terminal controls (keys, dial, POWER)
 python3 tools/qemu705.py --force-on --secs 60 --shot out.png   # headless + screenshot
 echo 0=ff > <scratch>/substat.txt           # poke sub-CPU status byte 0 live
 ```

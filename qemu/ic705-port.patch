@@ -593,10 +593,10 @@ index 0000000..cd2335b
 +}
 diff --git a/qemu-machine/src/mtu2g.c b/qemu-machine/src/mtu2g.c
 new file mode 100644
-index 0000000..1664993
+index 0000000..029b907
 --- /dev/null
 +++ b/qemu-machine/src/mtu2g.c
-@@ -0,0 +1,319 @@
+@@ -0,0 +1,370 @@
 +/*
 + * RZ/A1H MTU2 -- general (register-accurate) model, written for the IC-705 port.
 + *
@@ -626,6 +626,7 @@ index 0000000..1664993
 +#include "hw/core/sysbus.h"
 +#include "qom/object.h"
 +#include "rz_a1h.h"
++#include "qapi/visitor.h"
 +#include "rza1h_debug.h"
 +
 +#define MTU2G_FREQ_HZ 32000000ULL
@@ -686,9 +687,18 @@ index 0000000..1664993
 +    return (1000000000ULL * div[tpsc]) / MTU2G_FREQ_HZ ?: 1;
 +}
 +
++/* ch1/ch2 TMDR MD = 4..7: phase counting. TCNT follows the external encoder (A/B inputs),
++ * not the clock. The IC-705 main dial uses ch1 in mode 1 (TMDR 0x04) [FW 0xFCFF0381, VM]. */
++static bool phase_mode(RZA1HMtu2gState *s, int c)
++{
++    static const int tmdr[MTU2G_NCH] = { 0x301, 0x381, 0x001, -1, -1 };
++    int md = tmdr[c] >= 0 ? s->regs[tmdr[c]] & 0xf : 0;
++    return (c == 1 || c == 2) && md >= 4 && md <= 7;
++}
++
 +static uint16_t cur_tcnt(RZA1HMtu2gState *s, int c)
 +{
-+    if (!running(s, c)) {
++    if (!running(s, c) || phase_mode(s, c)) {
 +        return s->base_cnt[c];
 +    }
 +    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
@@ -715,7 +725,7 @@ index 0000000..1664993
 +static void schedule(RZA1HMtu2gState *s, int c)
 +{
 +    const Mtu2gCh *ch = &mtu2g_ch[c];
-+    if (!running(s, c)) {
++    if (!running(s, c) || phase_mode(s, c)) {
 +        timer_del(s->timer[c]);
 +        return;
 +    }
@@ -872,12 +882,53 @@ index 0000000..1664993
 +    }
 +}
 +
++/* Encoder input: QOM "dial" (write-only int) = signed number of counts to move the
++ * phase-counting channel (ch1, else ch2). Counts are applied at once; a TGR match or an
++ * over/underflow on the way sets the matching TSR flag (and its interrupt if enabled);
++ * TSR.TCFD (bit 7) shows the direction, as on the real counter. */
++static void mtu2g_set_dial(Object *obj, Visitor *v, const char *name, void *opaque,
++                           Error **errp)
++{
++    RZA1HMtu2gState *s = RZA1H_MTU2G(obj);
++    int64_t d;
++    int c = phase_mode(s, 1) ? 1 : phase_mode(s, 2) ? 2 : -1;
++
++    if (!visit_type_int(v, name, &d, errp)) {
++        return;
++    }
++    if (c < 0) {
++        rza1h_debug("mtu2", "dial %+lld ignored: no channel in phase-counting mode", (long long)d);
++        return;
++    }
++    const Mtu2gCh *ch = &mtu2g_ch[c];
++    int step = d >= 0 ? 1 : -1;
++    for (int64_t n = 0; n != d; n += step) {
++        uint16_t old = s->base_cnt[c];
++        uint16_t now = old + step;
++        s->base_cnt[c] = now;
++        if (step > 0 && old == 0xffff) {
++            s->regs[ch->tsr] |= 0x10;                       /* TCFV */
++        } else if (step < 0 && old == 0) {
++            s->regs[ch->tsr] |= 0x20;                       /* TCFU */
++        }
++        for (int i = 0; i < ch->ntgr; i++) {
++            if (now == r16(s, ch->tgr[i])) {
++                s->regs[ch->tsr] |= 1 << i;
++            }
++        }
++    }
++    s->regs[ch->tsr] = (s->regs[ch->tsr] & 0x7f) | (step > 0 ? 0x80 : 0);
++    rza1h_debug("mtu2", "dial %+lld -> ch%d TCNT %#x", (long long)d, c, s->base_cnt[c]);
++    update_irqs(s, c);
++}
++
 +static void mtu2g_init(Object *obj)
 +{
 +    RZA1HMtu2gState *s = RZA1H_MTU2G(obj);
 +    static void (*const cb[MTU2G_NCH])(void *) = { fire0, fire1, fire2, fire3, fire4 };
 +
 +    memory_region_init_io(&s->iomem, obj, &mtu2g_ops, s, "rza1h-mtu2g", RZA1H_MTU2_SIZE);
++    object_property_add(obj, "dial", "int", NULL, mtu2g_set_dial, NULL, NULL);
 +    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
 +    for (int c = 0; c < MTU2G_NCH; c++) {
 +        s->timer[c] = timer_new_ns(QEMU_CLOCK_VIRTUAL, cb[c], s);
@@ -1226,7 +1277,7 @@ index 0000000..7304927
 +
 +type_init(rg_register)
 diff --git a/qemu-machine/src/rz_a1h.c b/qemu-machine/src/rz_a1h.c
-index 2342e9e..7e5e73f 100644
+index 2342e9e..692e565 100644
 --- a/qemu-machine/src/rz_a1h.c
 +++ b/qemu-machine/src/rz_a1h.c
 @@ -27,6 +27,8 @@
@@ -1376,13 +1427,14 @@ index 2342e9e..7e5e73f 100644
      size_t i;
      int ch;
  
-@@ -331,6 +444,22 @@ static void rza1h_init(MachineState *machine)
+@@ -331,6 +444,23 @@ static void rza1h_init(MachineState *machine)
       * ring has drained, so its "ring now empty" flag-clear (main_idle_
       * loop's own entry-wait gate, 0x203906ed) never runs even once the
       * ring genuinely is empty. See mtu2.c's own comment. */
 +    if (rza1h_board_ic705()) {
 +        /* IC-705: general register-accurate MTU2 (mtu2g.c), all channels/events wired */
 +        mtu2 = qdev_new(TYPE_RZA1H_MTU2G);
++        object_property_add_child(OBJECT(qdev_get_machine()), "mtu2", OBJECT(mtu2));
 +        sysbus_realize_and_unref(SYS_BUS_DEVICE(mtu2), &error_fatal);
 +        sysbus_mmio_map_overlap(SYS_BUS_DEVICE(mtu2), 0, RZA1H_MTU2_BASE, 0);
 +        for (int c = 0; c < 5; c++) {
@@ -1399,7 +1451,7 @@ index 2342e9e..7e5e73f 100644
      mtu2 = qdev_new(TYPE_RZA1H_MTU2);
      sysbus_realize_and_unref(SYS_BUS_DEVICE(mtu2), &error_fatal);
      sysbus_mmio_map_overlap(SYS_BUS_DEVICE(mtu2), 0, RZA1H_MTU2_BASE, 0);
-@@ -352,6 +481,7 @@ static void rza1h_init(MachineState *machine)
+@@ -352,6 +482,7 @@ static void rza1h_init(MachineState *machine)
      sysbus_connect_irq(SYS_BUS_DEVICE(mtu2), 5,
                         qdev_get_gpio_in(gic,
                             RZA1H_MTU2_TGI1A_IRQ - RZA1H_GIC_NUM_INTERNAL));
@@ -1407,7 +1459,7 @@ index 2342e9e..7e5e73f 100644
  
      /* riic.c -- upgraded from a bare RAM region to a real device,
       * 2026-09-08 second pass, once body.bin's own cold-boot RIIC2 read
-@@ -394,6 +524,9 @@ static void rza1h_init(MachineState *machine)
+@@ -394,6 +525,9 @@ static void rza1h_init(MachineState *machine)
          sysbus_realize_and_unref(SYS_BUS_DEVICE(scif), &error_fatal);
          sysbus_mmio_map_overlap(SYS_BUS_DEVICE(scif), 0,
                                  RZA1H_SCIF0_BASE + i * RZA1H_SCIF_STRIDE, 0);
@@ -1417,7 +1469,7 @@ index 2342e9e..7e5e73f 100644
          sysbus_connect_irq(SYS_BUS_DEVICE(scif), 0,
                             qdev_get_gpio_in(gic,
                                 RZA1H_SCIF_TXI_BASE0 + i * RZA1H_SCIF_TXI_STRIDE
-@@ -407,7 +540,7 @@ static void rza1h_init(MachineState *machine)
+@@ -407,7 +541,7 @@ static void rza1h_init(MachineState *machine)
           * channel leaves it created but unmapped, a normal, inert QEMU
           * idiom (rza1h_scif_init's own comment explains why it can't be
           * skipped at creation time instead). */
@@ -1426,7 +1478,7 @@ index 2342e9e..7e5e73f 100644
              sysbus_mmio_map_overlap(SYS_BUS_DEVICE(scif), 1,
                                      RZA1H_SCIF5_DSP_RETRY_ARM_BASE, 0);
          }
-@@ -437,6 +570,17 @@ static void rza1h_init(MachineState *machine)
+@@ -437,6 +571,17 @@ static void rza1h_init(MachineState *machine)
                                                   RZA1H_GIC_NUM_INTERNAL));
      }
  
@@ -1444,7 +1496,7 @@ index 2342e9e..7e5e73f 100644
      /* sdhi.c -- the SD slot body.bin actually drives (not MMCIF, see sdhi.c).
       * The card is upstream's sd-card, backed by `-drive if=sd`; without one
       * the slot is empty. Overlap-mapped inside "io-e8030000". */
-@@ -468,6 +612,19 @@ static void rza1h_init(MachineState *machine)
+@@ -468,6 +613,19 @@ static void rza1h_init(MachineState *machine)
       * comment). Overlap-mapped: sits inside the broader "io-e8000000"
       * unimplemented-device catch-all above. SPRI2 wired 2026-09-24 for the
       * fake FPGA's sweep reads, see rspi2.c's own comment. */
@@ -1464,7 +1516,7 @@ index 2342e9e..7e5e73f 100644
      rspi2 = qdev_new(TYPE_RZA1H_RSPI2);
      sysbus_realize_and_unref(SYS_BUS_DEVICE(rspi2), &error_fatal);
      sysbus_mmio_map_overlap(SYS_BUS_DEVICE(rspi2), 0, RZA1H_RSPI2_BASE, 0);
-@@ -475,6 +632,7 @@ static void rza1h_init(MachineState *machine)
+@@ -475,6 +633,7 @@ static void rza1h_init(MachineState *machine)
                         qdev_get_gpio_in(gic, RZA1H_RSPI2_SPRI_IRQ -
                                               RZA1H_GIC_NUM_INTERNAL));
  
@@ -1472,7 +1524,7 @@ index 2342e9e..7e5e73f 100644
      /* ssif.c -- SSIF0/1, the CPU end of the DSP audio link (2026-09-24, see ssif.c).
       * Overlap-mapped inside "io-e8200000"; no IRQs (the firmware polls DMAC CHSTAT). */
      {
-@@ -514,15 +672,39 @@ static void rza1h_init(MachineState *machine)
+@@ -514,15 +673,39 @@ static void rza1h_init(MachineState *machine)
      sysbus_realize_and_unref(SYS_BUS_DEVICE(adc), &error_fatal);
      sysbus_mmio_map_overlap(SYS_BUS_DEVICE(adc), 0, RZA1H_ADC_BASE, 1);
  
