@@ -295,3 +295,9 @@ Findings on the way:
   boot. The ARM's serial-audio ports in use are SSIF0, SSIF3 and SSIF5, all DMA-driven
   with 288-byte buffers (`0x200FEF94`; DMA request sources 225/226, 238, 246). Which of
   them faces the DV DSP is the next question.
+- **The DV DSP is behind the main DSP [FW]:** the ARM stores the DV DSP version (block
+  `0x203E1B67`, shown as "DV DSP" in adjust mode) from its RSPI0 main-DSP message handler
+  (`0x20202128`). With no SPI/UART on the DV DSP side, its only links are I2S0/I2S2, so the
+  ARM reaches it through the main DSP, which relays versions (and presumably commands and
+  voice frames). Linking the DV DSP into the radio therefore needs the main DSP running
+  too [INF, strong].
