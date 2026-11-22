@@ -11,8 +11,10 @@ Tags: [FW] firmware static · [HW] radio · [VM] emulator · [EXT] outside · [I
   DSP/FPGA version mismatch, because the main DSP and DV DSP are not emulated.
   **Next:** main DSP core is likely an ADI SHARC (see EMULATION.md); confirm and its host link (RSPI0 command
   queue `0x20201F4C`, ready P3_8), then decide between a full C55x core in QEMU or a
-  firmware-accurate version responder; FPGA stays a dummy (owner's choice). Input path
-  (keys/touch/dial) still unidentified.
+  firmware-accurate version responder; FPGA stays a dummy (owner's choice).
+- **2026-11-22 (later): owner chose input/peripherals before DSPs.** Keys work end to end
+  (sub ADC ladders); settings EEPROM modelled (RIIC0 0x50..0x53, 256 KiB); charger-sense
+  default fixed. Next: key map (which ladder level = which key), touch path, dial.
 
 - **2026-11-21: DMR modulator PoC done [VM]** (`POC.md`). The patched DV DSP `gmsk_mod_bit`
   produces DMR 4FSK that dsd-neo locks onto, identical to an ideal reference. The

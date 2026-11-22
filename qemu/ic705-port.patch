@@ -1,5 +1,5 @@
 diff --git a/qemu-machine/patches/hw-arm-build.patch b/qemu-machine/patches/hw-arm-build.patch
-index 85a6e02..b745fca 100644
+index 85a6e02..27d3fa6 100644
 --- a/qemu-machine/patches/hw-arm-build.patch
 +++ b/qemu-machine/patches/hw-arm-build.patch
 @@ -22,6 +22,6 @@ index 4233a80..605fa4f 100644
@@ -7,11 +7,11 @@ index 85a6e02..b745fca 100644
   
   arm_common_ss.add(files('boot.c'))
 -+arm_common_ss.add(when: 'CONFIG_RZA1H', if_true: files('rz_a1h.c', 'ostm.c', 'spibsc.c', 'wdt.c', 'stbc.c', 'gpio.c', 'l2c.c', 'scif.c', 'mmc.c', 'sdhi.c', 'riic.c', 'mtu2.c', 'dmac.c', 'rspi2.c', 'openvg.c', 'rx8803.c', 'adc.c', 'vdc5.c', 'fake_dsp.c', 'fake_fpga.c', 'ssif.c'))
-++arm_common_ss.add(when: 'CONFIG_RZA1H', if_true: files('rz_a1h.c', 'ostm.c', 'spibsc.c', 'wdt.c', 'stbc.c', 'gpio.c', 'l2c.c', 'scif.c', 'mmc.c', 'sdhi.c', 'riic.c', 'mtu2.c', 'mtu2g.c', 'dmac.c', 'dmac_hi.c', 'rspi_gen.c', 'stm32l0.c', 'rspi2.c', 'openvg.c', 'rx8803.c', 'adc.c', 'vdc5.c', 'fake_dsp.c', 'fake_fpga.c', 'ssif.c'))
+++arm_common_ss.add(when: 'CONFIG_RZA1H', if_true: files('rz_a1h.c', 'ostm.c', 'spibsc.c', 'wdt.c', 'stbc.c', 'gpio.c', 'l2c.c', 'scif.c', 'mmc.c', 'sdhi.c', 'riic.c', 'mtu2.c', 'mtu2g.c', 'dmac.c', 'dmac_hi.c', 'rspi_gen.c', 'stm32l0.c', 'm24m02.c', 'rspi2.c', 'openvg.c', 'rx8803.c', 'adc.c', 'vdc5.c', 'fake_dsp.c', 'fake_fpga.c', 'ssif.c'))
   
   hw_common_arch += {'arm': arm_common_ss}
 diff --git a/qemu-machine/setup.sh b/qemu-machine/setup.sh
-index 4fcbd09..5bb9800 100755
+index 4fcbd09..8e7dffb 100755
 --- a/qemu-machine/setup.sh
 +++ b/qemu-machine/setup.sh
 @@ -27,7 +27,7 @@ echo "Symlinking sources..."
@@ -19,7 +19,7 @@ index 4fcbd09..5bb9800 100755
  # so the gap was latent -- a from-scratch qemu-src/ checkout would have
  # failed to build). Keep this in sync with meson.build's files() list.
 -for f in rz_a1h.c rz_a1h.h rza1h_debug.h ostm.c spibsc.c wdt.c stbc.c gpio.c l2c.c scif.c mmc.c sdhi.c riic.c mtu2.c dmac.c rspi2.c openvg.c rx8803.c adc.c vdc5.c fake_dsp.c fake_dsp.h fake_fpga.c fake_fpga.h ssif.c; do
-+for f in rz_a1h.c rz_a1h.h rza1h_debug.h ostm.c spibsc.c wdt.c stbc.c gpio.c l2c.c scif.c mmc.c sdhi.c riic.c mtu2.c mtu2g.c dmac.c dmac_hi.c rspi_gen.c stm32l0.c stm32l0.h rspi2.c openvg.c rx8803.c adc.c vdc5.c fake_dsp.c fake_dsp.h fake_fpga.c fake_fpga.h ssif.c; do
++for f in rz_a1h.c rz_a1h.h rza1h_debug.h ostm.c spibsc.c wdt.c stbc.c gpio.c l2c.c scif.c mmc.c sdhi.c riic.c mtu2.c mtu2g.c dmac.c dmac_hi.c rspi_gen.c stm32l0.c stm32l0.h m24m02.c rspi2.c openvg.c rx8803.c adc.c vdc5.c fake_dsp.c fake_dsp.h fake_fpga.c fake_fpga.h ssif.c; do
      ln -sf "../../../src/$f" "$QEMU_SRC/hw/arm/$f"
  done
  
@@ -427,6 +427,170 @@ index 908927a..fe87611 100644
  }
  
  static void rza1h_gpio_class_init(ObjectClass *oc, const void *data)
+diff --git a/qemu-machine/src/m24m02.c b/qemu-machine/src/m24m02.c
+new file mode 100644
+index 0000000..cd2335b
+--- /dev/null
++++ b/qemu-machine/src/m24m02.c
+@@ -0,0 +1,158 @@
++/*
++ * 256 KiB I2C serial EEPROM (24M02 class), written for the IC-705 port.
++ *
++ * The IC-705 settings EEPROM sits on RIIC0 and answers at 0x50..0x53: device-address
++ * bits 1:0 carry A17:A16, then two word-address bytes, then data. One QEMU I2C slave is
++ * created per device address ("bank" 0..3); all four share one backing image.
++ *
++ * Writes wrap inside a 256-byte page, as on the real part. The image is seeded from
++ * RZA1H_IC705_EEPROM (if the file exists) and written back to that file 1 s (virtual)
++ * after the last write transaction, so settings persist across runs.
++ */
++#include "qemu/osdep.h"
++#include "qemu/timer.h"
++#include "hw/i2c/i2c.h"
++#include "qom/object.h"
++#include "qapi/error.h"
++#include "rz_a1h.h"
++#include "rza1h_debug.h"
++
++#define TYPE_M24M02 "m24m02"
++OBJECT_DECLARE_SIMPLE_TYPE(M24M02State, M24M02)
++
++#define EE_SIZE (4 * 65536)
++#define EE_PAGE 256
++
++typedef struct {
++    uint8_t mem[EE_SIZE];
++    char *path;
++    QEMUTimer *flush;
++} M24M02Image;
++
++static M24M02Image *ee_img;
++
++struct M24M02State {
++    I2CSlave parent_obj;
++    int bank;
++    int nsent;          /* bytes received in this write transaction */
++    uint32_t addr;      /* 18-bit address */
++    bool wrote;
++};
++
++static void ee_flush(void *opaque)
++{
++    M24M02Image *im = opaque;
++    if (im->path && !g_file_set_contents(im->path, (const char *)im->mem, EE_SIZE, NULL)) {
++        rza1h_debug("riic", "m24m02: cannot write %s", im->path);
++    }
++}
++
++static M24M02Image *ee_image(void)
++{
++    if (!ee_img) {
++        const char *path = getenv("RZA1H_IC705_EEPROM");
++        gchar *data = NULL;
++        gsize len = 0;
++
++        ee_img = g_new0(M24M02Image, 1);
++        memset(ee_img->mem, 0xFF, EE_SIZE);
++        if (path) {
++            ee_img->path = g_strdup(path);
++            if (g_file_get_contents(path, &data, &len, NULL)) {
++                memcpy(ee_img->mem, data, MIN(len, EE_SIZE));
++                g_free(data);
++            }
++        }
++        ee_img->flush = timer_new_ns(QEMU_CLOCK_VIRTUAL, ee_flush, ee_img);
++        rza1h_debug("riic", "m24m02: image %s (%zu bytes loaded)", path ? path : "(none)",
++                    (size_t)len);
++    }
++    return ee_img;
++}
++
++static int m24m02_event(I2CSlave *i2c, enum i2c_event event)
++{
++    M24M02State *s = M24M02(i2c);
++
++    switch (event) {
++    case I2C_START_RECV:
++        rza1h_debug("ee", "rd %05x", s->addr);
++        break;
++    case I2C_START_SEND:
++        s->nsent = 0;
++        s->wrote = false;
++        break;
++    case I2C_FINISH:
++        if (s->wrote) {
++            M24M02Image *im = ee_image();
++            rza1h_debug("ee", "wr %05x n=%d", s->addr, s->nsent - 2);
++            timer_mod(im->flush, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + NANOSECONDS_PER_SECOND);
++        }
++        break;
++    default:
++        break;
++    }
++    return 0;
++}
++
++static int m24m02_send(I2CSlave *i2c, uint8_t data)
++{
++    M24M02State *s = M24M02(i2c);
++    M24M02Image *im = ee_image();
++
++    if (s->nsent == 0) {
++        s->addr = (s->bank << 16) | (data << 8);
++    } else if (s->nsent == 1) {
++        s->addr = (s->addr & 0x3FF00) | data;
++    } else {
++        im->mem[s->addr % EE_SIZE] = data;
++        s->addr = (s->addr & ~(uint32_t)(EE_PAGE - 1)) | ((s->addr + 1) & (EE_PAGE - 1));
++        s->wrote = true;
++    }
++    s->nsent++;
++    return 0;
++}
++
++static uint8_t m24m02_recv(I2CSlave *i2c)
++{
++    M24M02State *s = M24M02(i2c);
++    uint8_t v = ee_image()->mem[s->addr % EE_SIZE];
++    rza1h_debug("ee", "rx %05x = %02x", s->addr, v);
++
++    s->addr = (s->addr + 1) % EE_SIZE;   /* sequential reads roll over the whole array */
++    return v;
++}
++
++static void m24m02_class_init(ObjectClass *oc, const void *data)
++{
++    I2CSlaveClass *isc = I2C_SLAVE_CLASS(oc);
++
++    isc->event = m24m02_event;
++    isc->recv = m24m02_recv;
++    isc->send = m24m02_send;
++}
++
++static const TypeInfo m24m02_info = {
++    .name          = TYPE_M24M02,
++    .parent        = TYPE_I2C_SLAVE,
++    .instance_size = sizeof(M24M02State),
++    .class_init    = m24m02_class_init,
++};
++
++static void m24m02_register(void)
++{
++    type_register_static(&m24m02_info);
++}
++
++type_init(m24m02_register)
++
++/* Create the four device addresses on @bus. */
++void rza1h_m24m02_create(I2CBus *bus)
++{
++    for (int i = 0; i < 4; i++) {
++        I2CSlave *d = i2c_slave_new(TYPE_M24M02, 0x50 + i);
++        M24M02(d)->bank = i;
++        i2c_slave_realize_and_unref(d, bus, &error_fatal);
++    }
++    ee_image();
++}
 diff --git a/qemu-machine/src/mtu2g.c b/qemu-machine/src/mtu2g.c
 new file mode 100644
 index 0000000..1664993
@@ -752,6 +916,29 @@ index 0000000..1664993
 +}
 +
 +type_init(mtu2g_register)
+diff --git a/qemu-machine/src/riic.c b/qemu-machine/src/riic.c
+index c7d220e..3c02b24 100644
+--- a/qemu-machine/src/riic.c
++++ b/qemu-machine/src/riic.c
+@@ -960,7 +960,17 @@ static void rza1h_riic_realize(DeviceState *dev, Error **errp)
+      * neither, so a transaction there now correctly NACKs like real unpopulated hardware would,
+      * rather than accidentally answering as an EEPROM too. */
+     s->eeprom_bus = i2c_init_bus(dev, "riic-slave");
+-    if (s->channel == 2) {
++    if (rza1h_board_ic705()) {
++        /* IC-705: the settings EEPROM is on RIIC0 at 0x50..0x53 with two word-address bytes
++         * up to 0xFFxx on each: a 256 KiB 24M02-style part (device-address bits 1:0 = A17:A16).
++         * Modelled in m24m02.c; RZA1H_IC705_EEPROM=<file> seeds it and receives write-backs.
++         * RIIC1 keeps the RX-8803 RTC; nothing else is populated. */
++        if (s->channel == 0) {
++            rza1h_m24m02_create(s->eeprom_bus);   /* m24m02.c */
++        } else if (s->channel == 1) {
++            i2c_slave_create_simple(s->eeprom_bus, "rx8803", RIIC1_RTC_I2C_ADDR);
++        }
++    } else if (s->channel == 2) {
+         /* Real GT24C128B (16KB, 2-byte addressing) at the real 7-bit address firmware always
+          * uses (RIIC2_EEPROM_I2C_ADDR, confirmed via decompile -- see that macro's own comment).
+          * No backing `-drive` is given, so `writable` defaults true in-memory-only (see
 diff --git a/qemu-machine/src/rspi_gen.c b/qemu-machine/src/rspi_gen.c
 new file mode 100644
 index 0000000..7304927
@@ -1328,7 +1515,7 @@ index 2342e9e..7e5e73f 100644
      mc->default_ram_size = RZA1H_RAM_SIZE;
      mc->default_ram_id = "rza1h.ram";
 diff --git a/qemu-machine/src/rz_a1h.h b/qemu-machine/src/rz_a1h.h
-index 9aac7c4..d7cf5cc 100644
+index 9aac7c4..3c9cd9e 100644
 --- a/qemu-machine/src/rz_a1h.h
 +++ b/qemu-machine/src/rz_a1h.h
 @@ -134,6 +134,16 @@
@@ -1348,6 +1535,15 @@ index 9aac7c4..d7cf5cc 100644
  
  /* riic.c -- matches emu/peripherals/riic.py's per-instance base addresses
   * (RIIC0-2, stride 0x400). RIIC2 is the diode-matrix EEPROM's controller,
+@@ -272,4 +282,8 @@
+ #define RZA1H_ADC_SIZE 0x00000100
+ #define TYPE_RZA1H_ADC "rza1h-adc"
+ 
++/* m24m02.c: IC-705 settings EEPROM (0x50..0x53) */
++typedef struct I2CBus I2CBus;
++void rza1h_m24m02_create(I2CBus *bus);
++
+ #endif
 diff --git a/qemu-machine/src/rza1h_debug.h b/qemu-machine/src/rza1h_debug.h
 index e356640..72eeaf4 100644
 --- a/qemu-machine/src/rza1h_debug.h
@@ -1550,10 +1746,10 @@ index 11f4f4c..aae4d64 100644
          s->fp_input = qemu_input_handler_register(dev, &rza1h_scif3_fp_input_handler);
 diff --git a/qemu-machine/src/stm32l0.c b/qemu-machine/src/stm32l0.c
 new file mode 100644
-index 0000000..0fb5bcb
+index 0000000..f1c7906
 --- /dev/null
 +++ b/qemu-machine/src/stm32l0.c
-@@ -0,0 +1,1163 @@
+@@ -0,0 +1,1202 @@
 +/*
 + * STM32L0 (Cortex-M0+) SoC model -- the IC-705 sub-CPU ("ICOM4075S"), IC-705 port.
 + *
@@ -1572,7 +1768,9 @@ index 0000000..0fb5bcb
 + * logged unimplemented region. External connections:
 + *   - USART1 TX bytes -> board hook; board bytes -> stm32l0_usart_rx().
 + *   - GPIO: qdev inputs "pa".."ph" (16 each) and outputs "pa-out".."ph-out".
-+ *   - ADC channel values: RZA1H_SUB_ADC="v0,v1,..." (12-bit), default mid-scale.
++ *   - ADC channel values: RZA1H_SUB_ADC="v0,v1,..." (12-bit), default mid-scale except the
++ *     key ladders (ch 0/1/14/15 = 0xFFF, no key); QOM "adc" = "ch=val,..." sets them live.
++ *     Conversions honour CFGR1.RES (the firmware uses 10-bit).
 + *   - SPI1: the attached device is not identified; MISO idles 0xFF.
 + * Debug: RZA1H_DEBUG=sub.
 + */
@@ -2147,7 +2345,7 @@ index 0000000..0fb5bcb
 +        if (!(s->adc_chselr & (1u << ch))) {
 +            continue;
 +        }
-+        s->adc_dr = s->adc_val[ch];
++        s->adc_dr = s->adc_val[ch] >> (2 * ((s->adc_cfgr1 >> 3) & 3));   /* RES */
 +        s->adc_isr |= (1 << 1) | (1 << 2);                  /* EOSMP, EOC */
 +        if (s->adc_cfgr1 & 1) {                             /* DMAEN: ch1/ch2 csel 0 */
 +            int c = dma_find(s, 0, 1, 0);
@@ -2643,7 +2841,10 @@ index 0000000..0fb5bcb
 +    }
 +
 +    for (int i = 0; i < 19; i++) {
-+        s->adc_val[i] = 0x800;
++        /* IC-705: channels 0, 1, 14, 15 are the key ladders (sub 0x8004714); open = 0xFFF.
++         * ch4 is reported to the ARM on request (sub 0x8003BD4, reply bit 4); any level there
++         * keeps the ARM out of deep standby (external-DC / charge mode) -> default 0. */
++        s->adc_val[i] = (i == 0 || i == 1 || i == 14 || i == 15) ? 0xFFF : i == 4 ? 0 : 0x800;
 +    }
 +    for (int i = 0; adc && *adc && i < 19; i++) {
 +        s->adc_val[i] = strtoul(adc, NULL, 0) & 0xFFF;
@@ -2667,6 +2868,39 @@ index 0000000..0fb5bcb
 +    qemu_register_reset(stm32l0_cpu_reset, s);
 +}
 +
++/* QOM "adc" (write-only): "ch=val[,ch=val...]", 12-bit full-scale values, settable live
++ * from QMP (qom-set /machine/subcpu adc "0=0x080") to press front-panel keys. */
++static void stm32l0_set_adc_prop(Object *obj, const char *str, Error **errp)
++{
++    STM32L0State *s = STM32L0(obj);
++    const char *p = str;
++
++    while (p && *p) {
++        char *e;
++        long ch = strtol(p, &e, 0);
++        if (*e != '=') {
++            error_setg(errp, "adc: expected ch=val");
++            return;
++        }
++        unsigned long v = strtoul(e + 1, &e, 0);
++        if (ch >= 0 && ch < 19) {
++            s->adc_val[ch] = v & 0xFFF;
++            sdebug("adc ch%ld = %#lx", ch, v & 0xFFF);
++        }
++        p = *e == ',' ? e + 1 : NULL;
++    }
++}
++
++static char *stm32l0_get_adc_prop(Object *obj, Error **errp)
++{
++    STM32L0State *s = STM32L0(obj);
++    GString *g = g_string_new("");
++    for (int i = 0; i < 19; i++) {
++        g_string_append_printf(g, "%s%d=%#x", i ? "," : "", i, s->adc_val[i]);
++    }
++    return g_string_free(g, false);
++}
++
 +static void stm32l0_init(Object *obj)
 +{
 +    STM32L0State *s = STM32L0(obj);
@@ -2679,6 +2913,7 @@ index 0000000..0fb5bcb
 +    s->sysclk = qdev_init_clock_in(dev, "sysclk", NULL, NULL, 0);
 +    s->refclk = qdev_init_clock_in(dev, "refclk", NULL, NULL, 0);
 +
++    object_property_add_str(obj, "adc", stm32l0_get_adc_prop, stm32l0_set_adc_prop);
 +    qdev_init_gpio_in_named(dev, gpio_in_a, "pa", 16);
 +    qdev_init_gpio_in_named(dev, gpio_in_b, "pb", 16);
 +    qdev_init_gpio_in_named(dev, gpio_in_c, "pc", 16);

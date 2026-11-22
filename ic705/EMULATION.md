@@ -122,6 +122,34 @@ set, byte `0x203E1F1C` has bits 3 and 7 set, and ARM ADC channel 6 (10-bit) read
 now 0x3FF. The byte `0x203E1F1C` reads 0x89 after normal power-on, so the ADC window is the
 real discriminator (a jig/ladder level on that channel) [INF].
 
+**Front-panel keys [FW]/[VM]:** four resistor ladders on sub-CPU ADC channels 0, 1, 14, 15
+(sub `0x8004714`; scan schedule `0x800467E`: even steps CHSELR 0xC003 → slots for ch0/ch1/
+ch14/ch15, step 5 0x3F0, step 10 0xC3F3; 10-bit mode). The 8-bit value (ADC bits 9:2) is
+classified with thresholds the ARM sends to sub RAM `0x200001BE` (E6 CC B9 8D 74 48 35 19):
+≥0xE6 open; 0xB9–0xCC level 4; 0x74–0x8D level 3; 0x35–0x48 level 2; ≤0x19 level 1; anything
+else ignored. Ladder → key-word bits: ch0 L2/L3/L4 = 0x1/0x2/0x4; ch1 L1..L4 = 0x8..0x40;
+ch14 = 0x80..0x400; ch15 = 0x800..0x4000 (`0x2000011C`, debounced twice, sent to the ARM,
+seen at ARM `0x203E1F1C`). Press from QMP: `qom-set /machine/subcpu adc "0=0x0c0"` (12-bit
+level values ≈ L1 0x0C0, L2 0x400, L3 0x800, L4 0xC00; release = 0xFFF). The old model's
+0x800 on every channel read as four held keys (key word 0x0889), which together with ARM
+ADC ch6 was what opened adjust mode.
+
+**Sub-CPU analog sense [FW]/[VM]:** ch4..9 are reported to the ARM on request (sub
+`0x8003BD4`, 10-bit, split 3+7 bits). Any level on **ch4** keeps the ARM out of deep standby
+(charge/external-DC behaviour) → model default 0; ch5–9 mid-scale are harmless.
+
+**Settings EEPROM [FW]/[VM]:** RIIC0, device addresses 0x50..0x53, two word-address bytes →
+256 KiB 24M02-class part (A17:A16 in the device address); primary/backup copies in banks 1
+and 3; layout tag "SX4075 V4.51-E00" at 0x3FE40 (image builder `0x20065420`). Modelled in
+`m24m02.c`, persisted to `RZA1H_IC705_EEPROM`. Open: the firmware clears the tag and rewrites
+~20 KB on every power-on before reading it, so it currently re-initialises each boot
+(defaults → Japanese UI) [VM].
+
+**Other buses seen [FW]:** RSPI3 = FPGA register port (`0x20118E00`); RIIC1 0x6B = 16-bit-
+register device (codec-like, `0x20019B28`); SCIF1 = CI-V frames `FE…FD` (`0x2010C134`); SCIF4 =
+byte ring of 0x36C (GPS NMEA likely, `0x20014460`); P0_5 bit-banged single-wire receiver
+(`0x20118770`, microphone keys likely). Touch path still unknown.
+
 **Factory block 0xFC0000 [FW]:** `0x20090FA4` checks the tag "ICOM INC 2019.12" at
 `0x18FFFFF0`, a 512-byte header at `0x18FE3F50`, and a byte sum over 0x3FC00 bytes at
 `0x18FC0000`. 0x3FC00 = 480×272×2, so this is a full-screen RGB565 image (the boot logo),
