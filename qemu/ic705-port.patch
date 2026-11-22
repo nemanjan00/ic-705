@@ -1,5 +1,5 @@
 diff --git a/qemu-machine/patches/hw-arm-build.patch b/qemu-machine/patches/hw-arm-build.patch
-index 85a6e02..27d3fa6 100644
+index 85a6e02..2bb032b 100644
 --- a/qemu-machine/patches/hw-arm-build.patch
 +++ b/qemu-machine/patches/hw-arm-build.patch
 @@ -22,6 +22,6 @@ index 4233a80..605fa4f 100644
@@ -7,11 +7,11 @@ index 85a6e02..27d3fa6 100644
   
   arm_common_ss.add(files('boot.c'))
 -+arm_common_ss.add(when: 'CONFIG_RZA1H', if_true: files('rz_a1h.c', 'ostm.c', 'spibsc.c', 'wdt.c', 'stbc.c', 'gpio.c', 'l2c.c', 'scif.c', 'mmc.c', 'sdhi.c', 'riic.c', 'mtu2.c', 'dmac.c', 'rspi2.c', 'openvg.c', 'rx8803.c', 'adc.c', 'vdc5.c', 'fake_dsp.c', 'fake_fpga.c', 'ssif.c'))
-++arm_common_ss.add(when: 'CONFIG_RZA1H', if_true: files('rz_a1h.c', 'ostm.c', 'spibsc.c', 'wdt.c', 'stbc.c', 'gpio.c', 'l2c.c', 'scif.c', 'mmc.c', 'sdhi.c', 'riic.c', 'mtu2.c', 'mtu2g.c', 'dmac.c', 'dmac_hi.c', 'rspi_gen.c', 'stm32l0.c', 'm24m02.c', 'rspi2.c', 'openvg.c', 'rx8803.c', 'adc.c', 'vdc5.c', 'fake_dsp.c', 'fake_fpga.c', 'ssif.c'))
+++arm_common_ss.add(when: 'CONFIG_RZA1H', if_true: files('rz_a1h.c', 'ostm.c', 'spibsc.c', 'wdt.c', 'stbc.c', 'gpio.c', 'l2c.c', 'scif.c', 'mmc.c', 'sdhi.c', 'riic.c', 'mtu2.c', 'mtu2g.c', 'dmac.c', 'dmac_hi.c', 'rspi_gen.c', 'stm32l0.c', 'm24m02.c', 'bq2571x.c', 'rspi2.c', 'openvg.c', 'rx8803.c', 'adc.c', 'vdc5.c', 'fake_dsp.c', 'fake_fpga.c', 'ssif.c'))
   
   hw_common_arch += {'arm': arm_common_ss}
 diff --git a/qemu-machine/setup.sh b/qemu-machine/setup.sh
-index 4fcbd09..8e7dffb 100755
+index 4fcbd09..a79d303 100755
 --- a/qemu-machine/setup.sh
 +++ b/qemu-machine/setup.sh
 @@ -27,7 +27,7 @@ echo "Symlinking sources..."
@@ -19,7 +19,7 @@ index 4fcbd09..8e7dffb 100755
  # so the gap was latent -- a from-scratch qemu-src/ checkout would have
  # failed to build). Keep this in sync with meson.build's files() list.
 -for f in rz_a1h.c rz_a1h.h rza1h_debug.h ostm.c spibsc.c wdt.c stbc.c gpio.c l2c.c scif.c mmc.c sdhi.c riic.c mtu2.c dmac.c rspi2.c openvg.c rx8803.c adc.c vdc5.c fake_dsp.c fake_dsp.h fake_fpga.c fake_fpga.h ssif.c; do
-+for f in rz_a1h.c rz_a1h.h rza1h_debug.h ostm.c spibsc.c wdt.c stbc.c gpio.c l2c.c scif.c mmc.c sdhi.c riic.c mtu2.c mtu2g.c dmac.c dmac_hi.c rspi_gen.c stm32l0.c stm32l0.h m24m02.c rspi2.c openvg.c rx8803.c adc.c vdc5.c fake_dsp.c fake_dsp.h fake_fpga.c fake_fpga.h ssif.c; do
++for f in rz_a1h.c rz_a1h.h rza1h_debug.h ostm.c spibsc.c wdt.c stbc.c gpio.c l2c.c scif.c mmc.c sdhi.c riic.c mtu2.c mtu2g.c dmac.c dmac_hi.c rspi_gen.c stm32l0.c stm32l0.h m24m02.c bq2571x.c rspi2.c openvg.c rx8803.c adc.c vdc5.c fake_dsp.c fake_dsp.h fake_fpga.c fake_fpga.h ssif.c; do
      ln -sf "../../../src/$f" "$QEMU_SRC/hw/arm/$f"
  done
  
@@ -84,6 +84,99 @@ index bf2411b..2ade9c9 100644
      memcpy(&s->regs[offset], &value, size);
  }
  
+diff --git a/qemu-machine/src/bq2571x.c b/qemu-machine/src/bq2571x.c
+new file mode 100644
+index 0000000..2e7d5bc
+--- /dev/null
++++ b/qemu-machine/src/bq2571x.c
+@@ -0,0 +1,87 @@
++/*
++ * Battery charger, TI BQ2571x class, written for the IC-705 port.
++ *
++ * The IC-705 programs a charger on RIIC1 at 0x6B through 16-bit registers 0x00..0x3A
++ * (low byte at the even address) and reads some back to compare, among them the ADC/status
++ * words 0x28 and 0x2C [FW 0x20019B28 write, 0x2001A174 read, table 0x2001A504]. This model
++ * is a register file with an auto-incrementing pointer: writes are stored, reads return the
++ * stored value. Manufacturer/device ID (0x2E/0x2F) read as a BQ25713 (0x40/0x88). Charging
++ * itself is not modelled.
++ */
++#include "qemu/osdep.h"
++#include "hw/i2c/i2c.h"
++#include "qom/object.h"
++#include "rza1h_debug.h"
++
++#define TYPE_BQ2571X "bq2571x"
++OBJECT_DECLARE_SIMPLE_TYPE(Bq2571xState, BQ2571X)
++
++struct Bq2571xState {
++    I2CSlave parent_obj;
++    uint8_t regs[256];
++    uint8_t ptr;
++    bool addr_byte;
++};
++
++static int bq_event(I2CSlave *i2c, enum i2c_event event)
++{
++    Bq2571xState *s = BQ2571X(i2c);
++    if (event == I2C_START_SEND) {
++        s->addr_byte = true;
++    }
++    return 0;
++}
++
++static int bq_send(I2CSlave *i2c, uint8_t data)
++{
++    Bq2571xState *s = BQ2571X(i2c);
++    if (s->addr_byte) {
++        s->ptr = data;
++        s->addr_byte = false;
++    } else {
++        rza1h_debug("bq", "w %02x = %02x", s->ptr, data);
++        if (s->ptr != 0x2E && s->ptr != 0x2F) {
++            s->regs[s->ptr] = data;
++        }
++        s->ptr++;
++    }
++    return 0;
++}
++
++static uint8_t bq_recv(I2CSlave *i2c)
++{
++    Bq2571xState *s = BQ2571X(i2c);
++    return s->regs[s->ptr++];
++}
++
++static void bq_reset(DeviceState *dev)
++{
++    Bq2571xState *s = BQ2571X(dev);
++    memset(s->regs, 0, sizeof(s->regs));
++    s->regs[0x2E] = 0x40;       /* ManufacturerID: TI */
++    s->regs[0x2F] = 0x88;       /* DeviceID: BQ25713 */
++    s->ptr = 0;
++}
++
++static void bq_class_init(ObjectClass *oc, const void *data)
++{
++    I2CSlaveClass *isc = I2C_SLAVE_CLASS(oc);
++    isc->event = bq_event;
++    isc->recv = bq_recv;
++    isc->send = bq_send;
++    device_class_set_legacy_reset(DEVICE_CLASS(oc), bq_reset);
++}
++
++static const TypeInfo bq_info = {
++    .name          = TYPE_BQ2571X,
++    .parent        = TYPE_I2C_SLAVE,
++    .instance_size = sizeof(Bq2571xState),
++    .class_init    = bq_class_init,
++};
++
++static void bq_register(void)
++{
++    type_register_static(&bq_info);
++}
++
++type_init(bq_register)
 diff --git a/qemu-machine/src/dmac.c b/qemu-machine/src/dmac.c
 index e85ce07..9ca2817 100644
 --- a/qemu-machine/src/dmac.c
@@ -1067,10 +1160,10 @@ index 0000000..029b907
 +
 +type_init(mtu2g_register)
 diff --git a/qemu-machine/src/riic.c b/qemu-machine/src/riic.c
-index c7d220e..3c02b24 100644
+index c7d220e..587d65d 100644
 --- a/qemu-machine/src/riic.c
 +++ b/qemu-machine/src/riic.c
-@@ -960,7 +960,17 @@ static void rza1h_riic_realize(DeviceState *dev, Error **errp)
+@@ -960,7 +960,18 @@ static void rza1h_riic_realize(DeviceState *dev, Error **errp)
       * neither, so a transaction there now correctly NACKs like real unpopulated hardware would,
       * rather than accidentally answering as an EEPROM too. */
      s->eeprom_bus = i2c_init_bus(dev, "riic-slave");
@@ -1084,6 +1177,7 @@ index c7d220e..3c02b24 100644
 +            rza1h_m24m02_create(s->eeprom_bus);   /* m24m02.c */
 +        } else if (s->channel == 1) {
 +            i2c_slave_create_simple(s->eeprom_bus, "rx8803", RIIC1_RTC_I2C_ADDR);
++            i2c_slave_create_simple(s->eeprom_bus, "bq2571x", 0x6B);   /* charger, bq2571x.c */
 +        }
 +    } else if (s->channel == 2) {
          /* Real GT24C128B (16KB, 2-byte addressing) at the real 7-bit address firmware always

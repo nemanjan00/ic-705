@@ -167,7 +167,8 @@ touch UI (SET > Display > System Language) is still English after a fresh QEMU s
   into `0x204988BC` and smoothed (`0x2011E4D0`, S-meter-like); type 8 = 10-bit value + 2 flags;
   type F = flag. The FPGA stays a dummy (owner's choice), so these read 0xFF now.
 - RIIC1 0x6B = battery charger, TI BQ2571x-style (16-bit registers 0x00–0x3A, status/ADC
-  0x28/0x2C read back; `0x20019B28`, `0x2001A174`). NACKs in the VM (no model yet).
+  0x28/0x2C read back; `0x20019B28`, `0x2001A174`). Modelled as a register file
+  (`bq2571x.c`, IDs 0x40/0x88); the firmware writes ChargeOption0 = 0x860F at power-on [VM].
 - RIIC1 0x32 = RX-8803 RTC; its interrupt is **IRQ0**, polled through IRQRR in
   `0x200E4588` → reads 7 bytes from register 0x10 (`0x200E3B98`).
 - SCIF1 = CI-V `FE…FD` (`0x2010C134`); SCIF2 = shared driver whose pins are switched by

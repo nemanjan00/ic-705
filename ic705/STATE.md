@@ -20,8 +20,8 @@ Tags: [FW] firmware static · [HW] radio · [VM] emulator · [EXT] outside · [I
   IRQs (none registered). Open leads: FPGA register pages polled over RSPI3 (`E0 00 00 0N`
   + 17× reg 0 reads), GIC 302–304 handler `0x2012642C`, SSIF3 status polling.
   EEPROM persistence fixed (bit-banged read path); UI switched to English and kept.
-  Open: POWER-off by long press does not take effect in the VM; battery charger (0x6B)
-  and FPGA status words unmodelled; both DSPs not emulated.
+  Open: POWER-off by long press does not take effect in the VM; FPGA status words unmodelled
+  (charger modelled); both DSPs not emulated.
 
 - **2026-11-21: DMR modulator PoC done [VM]** (`POC.md`). The patched DV DSP `gmsk_mod_bit`
   produces DMR 4FSK that dsd-neo locks onto, identical to an ideal reference. The
