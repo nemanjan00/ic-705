@@ -62,6 +62,7 @@ class Sharc:
         self.I, self.M, self.Lr, self.B = [0] * 16, [0] * 16, [0] * 16, [0] * 16
         self.dag_alt = [[0] * 16 for _ in range(4)]
         self.sreg = {n: 0 for n in D.UREG_G7}
+        self.dpi_irptl = 0
         self.sreg['MODE1'] = 0
         self.ustat = {}
         self.PX = 0
@@ -111,6 +112,19 @@ class Sharc:
         s = self.iw_base(a)
         for k in range(3):
             self.p_set(s + k, v >> (16 * k) & 0xFFFF)
+
+    def ureg_load(self, ur, a):
+        """ureg = mem; PX moves all 48 bits when the address is a 48-bit window."""
+        if D.UREG_G6[ur & 15] == 'PX' and ur >> 4 == 6 and self.iw_base(a & M32) is not None:
+            self.PX = self.rd48(a & M32)
+        else:
+            self.set_ureg(ur, self.rd(a))
+
+    def ureg_store(self, ur, a):
+        if D.UREG_G6[ur & 15] == 'PX' and ur >> 4 == 6 and self.iw_base(a & M32) is not None:
+            self.wr48(a & M32, self.PX)
+        else:
+            self.wr(a, self.get_ureg(ur))
 
     def rd(self, a, lw=False):
         """Data read (DM/PM): returns 32-bit value; 48-bit windows return the top 32 bits."""
@@ -477,7 +491,12 @@ class Sharc:
                 a *= 2.0 ** s32(ry)
             trunc = op in (0xCD, 0xDD) or self.m1('TRUNC')
             import math
-            v = math.trunc(a) if trunc else int(round(a))
+            if a != a:                                        # NaN -> all ones
+                v = -1
+            elif a in (float('inf'), float('-inf')):
+                v = (1 << 31) - 1 if a > 0 else -(1 << 31)
+            else:
+                v = math.trunc(a) if trunc else int(round(a))
             v = max(-(1 << 31), min((1 << 31) - 1, v))
             R[n] = v & M32
             self.alu_flags(R[n])
@@ -891,7 +910,7 @@ class Sharc:
             if d:
                 self.wr(a, val)
             else:
-                self.set_ureg(ur, self.rd(a))
+                self.ureg_load(ur, a)
             return
         if top3 == 0b011:
             if bits(w, 44, 44) == 0:                          # type 4
@@ -951,9 +970,9 @@ class Sharc:
                 i += 8
             a = (self.I[i] + data + (1 if self.pey else 0)) & M32
             if d:
-                self.wr(a, self.get_ureg(ur))
+                self.ureg_store(ur, a)
             else:
-                self.set_ureg(ur, self.rd(a))
+                self.ureg_load(ur, a)
             return
         if top3 in (0b110, 0b111):                            # type 10
             d, dmi, dmm, dreg = bits(w, 44, 44), bits(w, 43, 41), bits(w, 40, 38), bits(w, 26, 23)
@@ -1046,9 +1065,9 @@ class Sharc:
             g, d, l = bits(w, 41, 41), bits(w, 40, 40), bits(w, 39, 39)
             ur, addr = bits(w, 38, 32), bits(w, 31, 0) + (1 if self.pey else 0)
             if d:
-                self.wr(addr, self.get_ureg(ur))
+                self.ureg_store(ur, addr)
             else:
-                self.set_ureg(ur, self.rd(addr))
+                self.ureg_load(ur, addr)
             return
         if sub == 0b10100:                                    # type 18
             bop, sr, data = bits(w, 39, 37), bits(w, 36, 32), bits(w, 31, 0)
@@ -1204,7 +1223,9 @@ class Sharc:
             self.I[6] = self.rd(self.I[6])
             return
         if bits(w, 39, 39):
-            raise Halt('IDLE')
+            if not (self.sreg['IRPTL'] & self.sreg['IMASK']):
+                self.pc = here                                # IDLE until an interrupt
+                raise Halt('IDLE with nothing pending')
         return                                                # 21c NOP
 
     def exec_b(self, w, here, nxt):
@@ -1224,15 +1245,15 @@ class Sharc:
                     i, m = i + 8, m + 8
                 self.wr(self.dag(i, m, True), sx(bits(w, 31, 16), 16) & M32)
                 return
-            i, d, l, g = bits(w, 43, 41), bits(w, 40, 40), bits(w, 39, 39), bits(w, 38, 38)
+            i, d, l, g = bits(w, 43, 41), bits(w, 40, 40), bits(w, 39, 39), bits(w, 37, 37)
             ur, data = bits(w, 29, 23), sx(bits(w, 22, 16), 7)
             if g:
                 i += 8
             a = (self.I[i] + data) & M32
             if d:
-                self.wr(a, self.get_ureg(ur))
+                self.ureg_store(ur, a)
             else:
-                self.set_ureg(ur, self.rd(a))
+                self.ureg_load(ur, a)
             return
         # b-forms of 1/3/4/5/7/9: same layout as 48-bit without COMPUTE
         return self.exec48(w & ~0x7FFFFF, here, nxt)
@@ -1268,6 +1289,102 @@ class Spi:
             rxv = self.device(v) if self.device else 0xFF
             self.rx = rxv
             self.log.append((v, rxv))
+
+
+class Twi:
+    """ADSP-214xx TWI master (IOP 0x4400..): TWIMCTL +0x14 (MEN bit 0, MDIR bit 2, DCNT
+    bits 13..6), TWIMADDR +0x1C, TWIIRPTL +0x20 (RW1C: MCOM bit 4, MERR 5, TXINT 6, RXINT 7),
+    TWIIMASK +0x24, TWIFIFOSTAT +0x2C, TXTWI8 +0x80, RXTWI8 +0x88. Bytes move at once; the
+    slave is a dict addr -> callable(kind, byte) (kind 'w' write / 'r' read) or absent, in
+    which case writes are accepted and reads return 0. TWI raises DPI_IRPTL bit DPI_BIT and,
+    when DPI_IMASK_RE has it, core P14I (IRPTL bit 17). Transfers are logged in .log."""
+    DPI_BIT = 6          # [INF] the firmware unmasks only this DPI bit while using the TWI
+
+    def __init__(self, base=0x4400, slaves=None):
+        self.base, self.slaves = base, slaves or {}
+        self.r = {}
+        self.txq, self.rxq = [], []
+        self.left = 0
+        self.log = []
+
+    def irq(self, sim, bits):
+        self.r[0x20] = self.r.get(0x20, 0) | bits
+        if self.r[0x20] & self.r.get(0x24, 0):
+            sim.dpi_irptl |= 1 << self.DPI_BIT
+            if sim.iop_regs.get(0x1C35, 0) >> self.DPI_BIT & 1:
+                sim.sreg['IRPTL'] |= 1 << 17
+
+    def slave(self, kind, v=0):
+        a = self.r.get(0x1C, 0) & 0x7F
+        f = self.slaves.get(a)
+        out = f(kind, v) if f else 0
+        self.log.append((a, kind, v if kind == 'w' else out))
+        return out & 0xFF
+
+    def pump(self, sim):
+        """Move bytes while a master transfer is active."""
+        ctl = self.r.get(0x14, 0)
+        if not ctl & 1:
+            return
+        if ctl & 4:                                   # master receive
+            while self.left and len(self.rxq) < 2:
+                self.rxq.append(self.slave('r'))
+                self.left -= 1
+            if self.rxq:
+                self.irq(sim, 0x80)
+        else:
+            while self.left and self.txq:
+                self.slave('w', self.txq.pop(0))
+                self.left -= 1
+            if self.left:
+                self.irq(sim, 0x40)
+        if not self.left and not (ctl & 4 and self.rxq):
+            self.r[0x14] = ctl & ~1
+            self.irq(sim, 0x10)
+
+    def rd(self, sim, a):
+        o = a - self.base
+        if o == 0x2C:
+            lvl = lambda q: (0, 1, 3)[min(len(q), 2)]
+            return lvl(self.txq) | lvl(self.rxq) << 2
+        if o in (0x88, 0x8C):
+            v = self.rxq.pop(0) if self.rxq else 0
+            self.pump(sim)
+            return v
+        return self.r.get(o, 0)
+
+    def wr(self, sim, a, v):
+        o = a - self.base
+        if o == 0x20:
+            self.r[0x20] = self.r.get(0x20, 0) & ~v
+            if not self.r[0x20] & self.r.get(0x24, 0):
+                sim.dpi_irptl &= ~(1 << self.DPI_BIT)
+            return
+        if o in (0x80, 0x84):
+            self.txq += [v & 0xFF] if o == 0x80 else [v & 0xFF, v >> 8 & 0xFF]
+            self.pump(sim)
+            return
+        self.r[o] = v
+        if o == 0x14 and v & 1:
+            n = v >> 6 & 0xFF
+            self.left = 1 << 30 if n == 0xFF else n
+            self.log.append((self.r.get(0x1C, 0) & 0x7F, 'S', 'rd' if v & 4 else 'wr', n))
+            self.pump(sim)
+        elif o == 0x14 and v & 0x10 and self.left:              # STOP: end the transfer now
+            self.left = 0
+            self.r[0x14] = v | 1
+            self.pump(sim)
+
+
+class Dpi:
+    """DPI_IRPTL (IOP 0x1C32): read-only latch of DPI peripheral interrupts, cleared on read."""
+    def rd(self, sim, a):
+        v = sim.dpi_irptl
+        sim.dpi_irptl = 0
+        return v
+
+    def wr(self, sim, a, v):
+        pass
 
 
 # ------------------------------------------------------------------ fast-forward hooks
@@ -1325,6 +1442,8 @@ if __name__ == '__main__':
     sim.hle.update(HLE)
     for base in (0x1000, 0x2800):
         sim.iop[base] = Spi(base)
+    sim.iop[0x4400] = Twi()
+    sim.iop[0x1C32] = Dpi()
     if a.trace:
         sim.trace = []
     try:

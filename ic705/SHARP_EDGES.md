@@ -47,6 +47,15 @@ Symptom → cause → fix. Append the moment one bites.
 - **DMR sync detection alone doesn't prove 4-level correctness**: sync words use only
   ±3 symbols. Use dibit-exact recovery as the evidence.
 
+- **SHARC VISA type 15b has G at bit 37, not 38.** With G read from bit 38 a `PX = PM(3,I12)`
+  became `DM(3,I4)`, malloc's heap lookup returned 0 and the firmware called `exit()` —
+  which looked like "idle waiting for the host". An IDLE stop is not proof of a wait;
+  check how it was reached (here: via `exit` 0x1302FE). [VM]
+- **PX loads from 48-bit memory are 48-bit.** Treating them as 32-bit gives the wrong
+  heap base. [VM]
+- **Firmware divides by zero on purpose-free paths** (RECIPS 0 -> inf -> NaN -> FIX = all
+  ones); a simulator that throws on NaN stops a firmware that runs fine on silicon. [VM]
+
 ## Updater / delivery
 
 - **A patched DSP region with an unchanged version string is silently not flashed.**

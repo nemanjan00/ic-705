@@ -374,21 +374,39 @@ Conventions learned from the code [FW]:
   sequence>`; returns `I12 = DM(M7,I6); JUMP (M14,I12) (DB); RFRAME` with M14 = 1.
 - The PC universal register reads the address of the executing instruction; delayed
   branches execute two slot instructions.
-- Type 15b (VISA 32-bit `Ureg <-> DM(data7, Ix)`): UREG is bits 29..23 and DATA bits 22..16
-  (verified against prologue/epilogue save/restore pairs; the manual's text layout is
-  ambiguous).
+- Type 15b (VISA 32-bit `Ureg <-> DM|PM(data7, Ix)`): I bits 43..41, D 40, L 39, **G bit 37**
+  (bit 38 is unused; type 16b has G at 37 too), UREG bits 29..23, DATA bits 22..16
+  (verified against prologue/epilogue pairs and the heap-table lookup `PX = PM(3,I12)`).
+- `PX = DM|PM(...)` on a 48-bit (instruction-width) address moves all 48 bits; PX2 is the
+  upper 32. The run-time heap table at 0x8C100 (5-word entries, base 0xE0000, length
+  0x2000) is read this way.
+- Divide by zero is real: RECIPS of ±0 gives ±inf with AV set, the Newton steps turn it into
+  NaN, and FIX/TRUNC of NaN gives 0xFFFFFFFF. The firmware does this once during init
+  (`3072000 / 0` in the routine at 0x12C2A1) and carries on, so the simulator must not trap.
 - S registers (PEy file) are used as ordinary Uregs even outside SIMD.
 - Enhanced MODIFY (types 7/19): the destination I register is Is XOR IdIs
   (`I5 = MODIFY(I6,-17)` sets up a frame pointer); modifying Is in place breaks frames.
 - SIMD: PEy's half of a post-modify access uses the I value from before the instruction
   (address + 1), not the already-incremented one.
 
-Current stop [VM]: with a minimal SPI model (`Spi`: SPIF set when idle, instant transfers)
-the firmware completes its whole start-up in ~62,000 instructions and reaches its idle loop
-(`IDLE` at 0x8C0B5, waiting for an interrupt). SPI roles:
+Current stop [VM]: the firmware runs its complete init (~500,000 instructions: C runtime,
+heap, malloc'd objects, filter tables, codec set-up) and enters its main loop at 0x128BC9,
+which calls three service routines and then `IDLE` (0x13046F) until an interrupt.
+(An earlier stop at ~62,000 instructions was `exit()` after malloc failed; that was the
+type 15b G-bit decode bug, not the firmware waiting.) Peripherals it uses during init:
 - SPI (IOP 0x1000, SPICTL 0x5205): **master**, 8-bit, transfer started by a TXSPI write —
   the DSP drives a local peripheral (one transfer during start-up).
 - SPIB (IOP 0x2800, SPICTL 0x4206): **slave, DMA mode**, DMA set up at 0x2880..0x2884 — the
-  link the ARM drives on RSPI0. The DSP idles until the first host command lands there.
+  link the ARM drives on RSPI0.
+- TWI (IOP 0x4400): **I2C master to 7-bit address 0x18**, interrupt-driven (TWIIMASK 0x50 =
+  master-complete + TX service; DPI_IMASK_RE bit 6; core P14I). Init sends 41 two-byte
+  register writes (reg, value), e.g. 07=0A, 09=20, 0E=80, 25=E0, 26=10, 3A=2F, 47=80,
+  48=0F, 00=00, 01=80, then repeats part of the set. The register numbers stay within
+  0x00..0x4F; the only codecs in the service manual are two AK4951s, so this is most
+  likely one of them [INF] (address not yet checked against the data sheet).
+- IMASK at idle = P14I (DPI) + CB7I (C stack overflow); LIRPTL = 0, so the SPIB
+  interrupt is not yet enabled. Whatever enables it must come from a main-loop service
+  routine or from SPORT/timer activity.
+`Twi` and `Dpi` (DPI_IRPTL at 0x1C32, read-to-clear) in `sharc_sim.py` model this.
 Next: SPIB slave-DMA + interrupt model, and a QEMU <-> Python co-simulation bridge (RSPI0
 bytes and the P3_8 / P7_6 / P7_7 handshake lines over a socket).
