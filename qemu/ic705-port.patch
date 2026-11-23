@@ -24,7 +24,7 @@ index 4fcbd09..a79d303 100755
  done
  
 diff --git a/qemu-machine/src/adc.c b/qemu-machine/src/adc.c
-index bf2411b..2ade9c9 100644
+index bf2411b..2b99d9e 100644
 --- a/qemu-machine/src/adc.c
 +++ b/qemu-machine/src/adc.c
 @@ -48,6 +48,7 @@
@@ -35,7 +35,12 @@ index bf2411b..2ade9c9 100644
  
  OBJECT_DECLARE_SIMPLE_TYPE(RZA1HAdcState, RZA1H_ADC)
  
-@@ -59,6 +60,7 @@ struct RZA1HAdcState {
+@@ -55,10 +56,12 @@ struct RZA1HAdcState {
+     SysBusDevice parent_obj;
+     MemoryRegion iomem;
+     uint8_t regs[RZA1H_ADC_SIZE];
++    int32_t val[8];   /* IC-705 port: live 10-bit readings, -1 = not set (see "vals") */
+ };
  
  #define ADC_DRA 0x00
  #define ADC_DRH 0x0e
@@ -43,14 +48,18 @@ index bf2411b..2ade9c9 100644
  
  /* Mid-scale 10-bit reading (0x200 of 0-0x3ff), left-justified per the real register's own
   * bits-15:6 layout -- see the file comment for why >>6 in the real driver confirms this. */
-@@ -70,6 +72,16 @@ static uint64_t rza1h_adc_read(void *opaque, hwaddr offset, unsigned size)
+@@ -70,6 +73,20 @@ static uint64_t rza1h_adc_read(void *opaque, hwaddr offset, unsigned size)
      uint64_t val = 0;
  
      if (offset <= ADC_DRH && (offset % 2) == 0) {
++        int ch = offset / 2;
++        if (s->val[ch] >= 0) {
++            return (s->val[ch] & 0x3ff) << 6;
++        }
 +        /* RZA1H_ADC_VALS="v0,v1,...,v7" (10-bit) overrides per-channel readings */
 +        const char *e = getenv("RZA1H_ADC_VALS");
 +        if (e) {
-+            int ch = offset / 2, i = 0;
++            int i = 0;
 +            const char *p = e;
 +            while (*p && i < ch) { if (*p++ == ',') i++; }
 +            if (i == ch && *p) {
@@ -60,7 +69,7 @@ index bf2411b..2ade9c9 100644
          return ADC_QUIESCENT_READING;
      }
  
-@@ -82,6 +94,23 @@ static void rza1h_adc_write(void *opaque, hwaddr offset, uint64_t value,
+@@ -82,6 +99,23 @@ static void rza1h_adc_write(void *opaque, hwaddr offset, uint64_t value,
  {
      RZA1HAdcState *s = RZA1H_ADC(opaque);
  
@@ -84,6 +93,52 @@ index bf2411b..2ade9c9 100644
      memcpy(&s->regs[offset], &value, size);
  }
  
+@@ -100,11 +134,45 @@ static void rza1h_adc_reset(DeviceState *dev)
+     memset(s->regs, 0, sizeof(s->regs));
+ }
+ 
++/* IC-705 port: QOM string property "vals" = "ch=value,..." (10-bit) sets channels live,
++ * e.g. qom-set /machine/adc vals "4=0x3ff,5=0x1c0"; value -1 returns a channel to
++ * RZA1H_ADC_VALS / mid-scale. Used for the ARM-side key ladders (ch4/ch5/ch6). */
++static char *rza1h_adc_get_vals(Object *obj, Error **errp)
++{
++    RZA1HAdcState *s = RZA1H_ADC(obj);
++    GString *g = g_string_new(NULL);
++    for (int i = 0; i < 8; i++) {
++        g_string_append_printf(g, "%s%d=%d", i ? "," : "", i, s->val[i]);
++    }
++    return g_string_free(g, false);
++}
++
++static void rza1h_adc_set_vals(Object *obj, const char *v, Error **errp)
++{
++    RZA1HAdcState *s = RZA1H_ADC(obj);
++    const char *p = v;
++    while (p && *p) {
++        char *end;
++        long ch = strtol(p, &end, 0);
++        if (*end != '=' || ch < 0 || ch > 7) {
++            break;
++        }
++        s->val[ch] = strtol(end + 1, &end, 0);
++        rza1h_debug("adc", "ch%ld = %d", ch, s->val[ch]);
++        p = *end == ',' ? end + 1 : NULL;
++    }
++}
++
+ static void rza1h_adc_init(Object *obj)
+ {
+     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+     RZA1HAdcState *s = RZA1H_ADC(obj);
+ 
++    for (int i = 0; i < 8; i++) {
++        s->val[i] = -1;
++    }
++    object_property_add_str(obj, "vals", rza1h_adc_get_vals, rza1h_adc_set_vals);
++
+     memory_region_init_io(&s->iomem, obj, &rza1h_adc_ops, s,
+                           TYPE_RZA1H_ADC, RZA1H_ADC_SIZE);
+     sysbus_init_mmio(sbd, &s->iomem);
 diff --git a/qemu-machine/src/bq2571x.c b/qemu-machine/src/bq2571x.c
 new file mode 100644
 index 0000000..2e7d5bc
@@ -1633,7 +1688,7 @@ index 0000000..3c89819
 +
 +type_init(rg_register)
 diff --git a/qemu-machine/src/rz_a1h.c b/qemu-machine/src/rz_a1h.c
-index 2342e9e..51dc520 100644
+index 2342e9e..2b82f4e 100644
 --- a/qemu-machine/src/rz_a1h.c
 +++ b/qemu-machine/src/rz_a1h.c
 @@ -27,6 +27,8 @@
@@ -2209,7 +2264,11 @@ index 2342e9e..51dc520 100644
      /* ssif.c -- SSIF0/1, the CPU end of the DSP audio link (2026-09-24, see ssif.c).
       * Overlap-mapped inside "io-e8200000"; no IRQs (the firmware polls DMAC CHSTAT). */
      {
-@@ -514,15 +1002,50 @@ static void rza1h_init(MachineState *machine)
+@@ -511,18 +999,54 @@ static void rza1h_init(MachineState *machine)
+      * derivation in adc.c's own file comment. Overlap-mapped: sits inside the broader
+      * "io-e8000000" unimplemented-device catch-all above. */
+     adc = qdev_new(TYPE_RZA1H_ADC);
++    object_property_add_child(OBJECT(machine), "adc", OBJECT(adc));  /* QOM /machine/adc */
      sysbus_realize_and_unref(SYS_BUS_DEVICE(adc), &error_fatal);
      sysbus_mmio_map_overlap(SYS_BUS_DEVICE(adc), 0, RZA1H_ADC_BASE, 1);
  

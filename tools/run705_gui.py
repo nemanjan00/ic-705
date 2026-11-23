@@ -12,12 +12,15 @@ Boot is the real power-on path (ic705/EMULATION.md):
   - sub-CPU = STM32L0 model running the decoded aux2 firmware (RZA1H_SUBCPU_FW)
   - POWER (P3_9) pressed after --press-at s for --hold s: deep-standby cancel (factor
     bit 10), loader P8_7 timeout -> power-on flag -> full bring-up, UI after ~90 s
-  - ARM ADC ch0..7 = 0x300 except ch6 = 0x3FF; sub-CPU ADC defaults in stm32l0.c
-  - DSP/FPGA SPI flash on RSPI4 = decoded DSP group (DSPs/FPGA not emulated)
+  - ARM ADC ch0..7 = 0x300 except the key ladders ch4/ch5/ch6 = 0x3FF (released);
+    sub-CPU ADC defaults in stm32l0.c
+  - DSP/FPGA SPI flash on RSPI4 = decoded DSP group (DSPs need --dsp; FPGA is a dummy)
   - settings EEPROM image: --eeprom (default ~/icom/out/705_eeprom.bin)
 
-Controls: the GTK window itself takes mouse = touch, wheel = dial, and the same letter keys
-(see EMULATION.md "Window input"). From this terminal (it must have focus; keys go through the real sub-CPU ladder ADC path or the
+Controls: a front-panel window (tools/front_panel.py) has every known knob and key: main
+dial, MULTI, AF/RF-SQL and PBT encoders, the sub-CPU ladder keys, the ARM ADC ladder keys
+and POWER (--no-panel to skip it). The GTK window itself takes mouse = touch, wheel = dial,
+and the same letter keys (see EMULATION.md "Window input"). From this terminal (it must have focus; keys go through the real sub-CPU ladder ADC path or the
 MTU2 phase counter, see EMULATION.md "Front-panel keys"):
   m MENU   f FUNCTION   q QUICK   x/Esc EXIT   s M.SCOPE   k MULTI push   a AF/RF push
   l SPEECH/LOCK (hold 2 s)   u / d  UP / DOWN (hold 1 s)   r ch0-L3 (RIT-type key)
@@ -25,7 +28,7 @@ MTU2 phase counter, see EMULATION.md "Front-panel keys"):
   Left/Right  dial -1/+1 count   Up/Down  dial +10/-10   PgUp/PgDn  dial +100/-100
   p POWER tap (P3_9)   P POWER hold 3 s   Q quit
 """
-import argparse, os, subprocess, sys, termios, time, tty
+import argparse, os, subprocess, sys, termios, threading, time, tty
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import qemu705 as Q
 
@@ -46,11 +49,13 @@ ap.add_argument('--dsp', action='store_true', help='run both DSP simulators (see
 ap.add_argument('--substat', default=os.path.join(Q.SCR, 'substat.txt'))
 ap.add_argument('--press-at', type=float, default=6)
 ap.add_argument('--hold', type=float, default=3)
+ap.add_argument('--no-panel', action='store_true', help='no front-panel window')
 ap.add_argument('--eeprom', default=os.path.expanduser('~/icom/out/705_eeprom.bin'))
 a = ap.parse_args()
 adc = ['0x300'] * 8
-adc[6] = '0x3ff'
-env = dict(os.environ, RZA1H_BOARD='ic705', RZA1H_PINS='8_7=0', RZA1H_DSWAKE_BIT='10',
+adc[4] = adc[5] = adc[6] = '0x3ff'   # ARM key ladders released (0x2008DE40/0x2008DBF0)
+env = dict(os.environ, RZA1H_BOARD='ic705',
+           RZA1H_PINS='8_7=0,8_0=0,8_1=0,8_8=0,8_9=0,8_10=1,8_11=1',   # encoders idle RZA1H_DSWAKE_BIT='10',
            RZA1H_ADC_VALS=','.join(adc), RZA1H_RSPI4_FLASH=f'{FW}/dsp.image.bin',
            RZA1H_IC705_EEPROM=a.eeprom)
 if a.behavioral_sub:
@@ -76,6 +81,16 @@ args = [Q.QEMU, '-M', 'rz-a1h', '-kernel', Q.FLASH, '-display', 'gtk,zoom-to-fit
         '-qmp', f'unix:{sock},server=on,wait=off']
 p = subprocess.Popen(args, env=env)
 q = Q.QMP(sock)
+_qlock = threading.Lock()
+_qcmd = q.cmd
+
+
+def _locked_cmd(*args, **kw):   # one QMP client, shared by the terminal and the panel
+    with _qlock:
+        return _qcmd(*args, **kw)
+
+
+q.cmd = _locked_cmd
 
 
 def power(hold):
@@ -93,26 +108,50 @@ def key(ch, lvl, hold):
 time.sleep(a.press_at)
 power(a.hold)
 print('POWER pressed; the main screen appears after ~90 s.\r\n' + __doc__.split('Controls')[1])
-fd = sys.stdin.fileno()
-old = termios.tcgetattr(fd)
-tty.setcbreak(fd)
+stop = threading.Event()
+
+
+def terminal():
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    tty.setcbreak(fd)
+    try:
+        while p.poll() is None and not stop.is_set():
+            c = os.read(fd, 8).decode(errors='ignore')
+            if c == 'Q':
+                break
+            if c in DIAL:
+                q.cmd('qom-set', path='/machine/mtu2', property='dial', value=DIAL[c])
+            elif c in KEYS:
+                ch, lvl, hold, label = KEYS[c]
+                print(f'{label}\r')
+                key(ch, lvl, hold)
+            elif c == 'p':
+                power(0.5)
+            elif c == 'P':
+                power(3)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        stop.set()
+
+
 try:
-    while p.poll() is None:
-        c = os.read(fd, 8).decode(errors='ignore')
-        if c == 'Q':
-            break
-        if c in DIAL:
-            q.cmd('qom-set', path='/machine/mtu2', property='dial', value=DIAL[c])
-        elif c in KEYS:
-            ch, lvl, hold, label = KEYS[c]
-            print(f'{label}\r')
-            key(ch, lvl, hold)
-        elif c == 'p':
-            power(0.5)
-        elif c == 'P':
-            power(3)
+    if a.no_panel:
+        terminal()
+    else:
+        import front_panel
+        threading.Thread(target=terminal, daemon=True).start()
+        panel = front_panel.Panel(q, on_quit=lambda: stop.set())
+
+        def poll():
+            if stop.is_set() or p.poll() is not None:
+                panel.root.destroy()
+            else:
+                panel.root.after(200, poll)
+        poll()
+        panel.mainloop()
 finally:
-    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    stop.set()
     if p.poll() is None:
         q.cmd('quit')
     p.wait()

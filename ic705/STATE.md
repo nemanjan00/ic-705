@@ -37,6 +37,11 @@ Tags: [FW] firmware static · [HW] radio · [VM] emulator · [EXT] outside · [I
 
 ## Milestones (newest first)
 
+- **2026-11-23: front panel complete [FW]/[VM].**
+  - MULTI (P8_10/11), AF/RF-SQL (P8_8/9) and PBT (P8_0/1) encoders found on port 8.
+  - Three ARM-ADC key ladders found (ch4/ch5/ch6; ch6 L1 = V/M).
+  - The stale ch4/ch5 = 0x300 default was reading as a held key.
+  - `run705_gui.py` opens a Tk panel with every knob and key (`tools/front_panel.py`).
 - **2026-11-22: DV DSP linked [VM].** The 0x3500 block is the C5517 McSPI, set up as a
   slave. Its master is the ARM's RSPI0, carrying length-framed packets
   `[L][type][data][FF]`. It reports DV version 1.11. The supposed "periodic McSPI re-init"
@@ -85,6 +90,7 @@ None. There has been no radio access; this is static analysis of `705E140.dat`
 - What the FPGA does. It has no direct ARM link identified so far; the RSPI3 "status
   words" are the SHARC's.
 - The running UI's time source (the clock shows 0:00), and front-panel power-off.
+- PTT/TRANSMIT inputs, and the red "TX" status box shown on every emulated boot.
 - Everything [HW]: no claim here has been checked on a radio.
 
 ## Done

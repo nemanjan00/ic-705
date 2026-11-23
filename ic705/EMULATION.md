@@ -141,7 +141,42 @@ ADC ch6 was what opened adjust mode.
 ch1 L1 MENU · ch14 L1 FUNCTION · ch14 L2 M.SCOPE · ch14 L3 QUICK · ch14 L4 EXIT ·
 ch0 L2 MULTI push (RF POWER/MIC GAIN/COMP/MONITOR) · ch1 L2 AF/RF push (RF GAIN/SQL) ·
 ch0 L3 toggles RIT · ch15 L1 held = dial lock (SPEECH/LOCK) · ch15 L3/L4 held = frequency
-steps (UP/DOWN-type) · ch0 L1, ch1 L3, ch1 L4 not identified yet.
+steps (UP/DOWN-type) · ch0 L1 opens the BW/SFT (twin PBT) window · ch1 L3, ch1 L4, ch15 L2
+show nothing visible on the main screen yet.
+
+**Front-panel encoders [FW]/[VM]:** besides the main dial (MTU2 ch1), three quadrature
+encoders sit on **port 8**. The ARM samples PPR8 from its ADC tick (`0x20104B0C` →
+`0x2008E2F0`) and keeps their counts in front-panel bytes +16..+18 (block `0x203E1F1B`).
+- P8_0/P8_1 → byte +16. Decoder `0x2008E200` (one count per two Gray transitions).
+  Turning it opens and moves the BW/SFT (twin PBT) window [VM].
+- P8_8/P8_9 → byte +17. Same decoder. Shows and changes **AF GAIN** [VM], so it is the
+  AF/RF-SQL knob (its push is ch1 L2).
+- P8_10/P8_11 → byte +18. Active-low inputs, decoder `0x2008E13C` (one count per full
+  Gray cycle). Changes the frequency by 1 kHz per count [VM], **MULTI** [INF]. Turning it
+  fast gives bigger steps (speed-up).
+
+Model: no new device. The `pins` property steps the pins through Gray code; idle is
+`8_0=0,8_1=0,8_8=0,8_9=0,8_10=1,8_11=1`. The main dial runs at 10 Hz per MTU2 count.
+
+**ARM ADC key ladders [FW]/[VM]:** the ARM's own ADC (`0x2011DF28` copies DR0..7 into
+`0x203E1E30`) carries three more ladders. They are classified every 4 ticks into
+front-panel bytes +4/+5:
+- **ch6** (`0x2008DBF0`): 160–236 / 56–124 / 312–397 / 509–597 = levels 0–3 → byte +4 bits
+  0x04/0x08/0x01/0x02; released when ≥ 836. ch6 L1 (≈ 90) switches VFO↔MEMO, **V/M**
+  [VM, name INF]. The adjust-mode window 721..802 lies between these levels.
+- **ch4 and ch5** (`0x2008DE40`): 412–514 / 576–669 / 700–781 / 809–880 = levels 1–4 →
+  byte +5 bits 0x01–0x08 (ch4) and 0x10–0x80 (ch5); released when ≥ 920; ≤ 372 is a
+  separate "shorted" state. No visible effect on the main screen [VM]. Probably mic or
+  accessory keys [INF].
+- The old default of 0x300 on ch4/ch5 read as **level 3 held**. The GUI now starts them at
+  0x3FF. Live control: `qom-set /machine/adc vals "6=90"` (10-bit; -1 returns the channel
+  to `RZA1H_ADC_VALS`).
+- Other ARM ADC channels: ch0 (threshold checks in `0x200198E4`, level mapping in
+  `0x20061618`); ch7 smoothed into the long-press/TX block (+876); ch2/ch3 only in one
+  power mode.
+
+**Open:** a red "TX" box shows in the status bar on every boot. It stays with ch4/ch5
+released, so it is not that ladder. PTT/TRANSMIT inputs are not identified.
 
 **Main dial [FW]/[VM]:** MTU2 channel 1 in phase-counting mode 1 (TMDR_1 = 0x04, TSTR CST1),
 10 Hz per count in the default step. The old timer model free-ran TCNT1, which looked like the
@@ -218,6 +253,11 @@ found yet.
 **Window input [VM]:** in the GTK window, the mouse is the touch panel (pixel → raw with the
 calibration above), the wheel and Left/Right are the main dial, M/F/S/Q/X(Esc)/K/A/R/L/U/D/1/2/3
 are the ladder keys (held while held), and P is POWER.
+`tools/run705_gui.py` also opens a Tk **front-panel window** (`tools/front_panel.py`). It
+has the main dial, the MULTI, AF/RF-SQL and PBT encoders (wheel or ◀ ▶), every sub-CPU
+and ARM ladder key (held while the mouse is held), and POWER. Checked against the
+emulator: MENU opens the menu, MULTI ±5 moves ±5 kHz, AF/RF-SQL shows AF GAIN, and
+100 main-dial counts = 1 kHz [VM].
 
 **Factory block 0xFC0000 [FW]:** `0x20090FA4` checks the tag "ICOM INC 2019.12" at
 `0x18FFFFF0`, a 512-byte header at `0x18FE3F50`, and a byte sum over 0x3FC00 bytes at
