@@ -9,6 +9,9 @@ Every control goes through QMP to the same inputs the firmware reads:
   - encoders on port 8: /machine/gpio pins "8_a=..,8_b=.." stepped through Gray code;
     the ARM samples them from its ADC tick (0x2008E2F0)
   - POWER: /machine/gpio pins 3_9 (active low)
+  - PTT: sub-CPU PC15, active low (/machine/subcpu pins "C15=0"; "C15=-1" releases it to its
+    pull-up). The sub-CPU reports it as key-word bit 0x8000; the ARM then sets its transmit
+    flag (0x203806F4 bit 6). Mic-jack PTT is assumed to share this line [INF].
 Buttons are held while the mouse button is held. Knobs: mouse wheel over the knob, or the
 arrow buttons (shift-click = 10 steps).
 """
@@ -67,6 +70,9 @@ class Panel:
 
     def sub(self, ch, v):
         self.q.cmd('qom-set', path='/machine/subcpu', property='adc', value=f'{ch}={v:#x}')
+
+    def ptt(self, on):
+        self.q.cmd('qom-set', path='/machine/subcpu', property='pins', value='C15=0' if on else 'C15=-1')
 
     def arm(self, ch, v):
         self.q.cmd('qom-set', path='/machine/adc', property='vals', value=f'{ch}={v}')
@@ -131,6 +137,14 @@ class Panel:
         pw = self._hold_button(keys, 'POWER', lambda: self.pins('3_9=0'), lambda: self.pins('3_9=1'),
                                bg='#a33', fg='white')
         pw.grid(row=0, column=0, padx=2, pady=2)
+
+        tx = tk.LabelFrame(self.root, text='PTT (sub-CPU PC15; body/mic PTT)', padx=4, pady=4)
+        tx.pack(fill='x', padx=6, pady=(6, 0), before=keys)
+        self._hold_button(tx, 'PTT (hold)', lambda: self.ptt(True), lambda: self.ptt(False),
+                          bg='#c60', fg='white').pack(side='left', padx=2)
+        latch = tk.BooleanVar(value=False)
+        tk.Checkbutton(tx, text='PTT latch', variable=latch,
+                       command=lambda: self.do(lambda: self.ptt(latch.get()))).pack(side='left', padx=8)
         for i, (label, ch, lvl) in enumerate(SUB_KEYS, 1):
             self._hold_button(keys, label, lambda ch=ch, lvl=lvl: self.sub(ch, SUB_LEVEL[lvl]),
                               lambda ch=ch: self.sub(ch, SUB_OPEN)).grid(

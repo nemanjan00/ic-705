@@ -55,7 +55,8 @@ a = ap.parse_args()
 adc = ['0x300'] * 8
 adc[4] = adc[5] = adc[6] = '0x3ff'   # ARM key ladders released (0x2008DE40/0x2008DBF0)
 env = dict(os.environ, RZA1H_BOARD='ic705',
-           RZA1H_PINS='8_7=0,8_0=0,8_1=0,8_8=0,8_9=0,8_10=1,8_11=1',   # encoders idle RZA1H_DSWAKE_BIT='10',
+           RZA1H_PINS='8_7=0,8_0=0,8_1=0,8_8=0,8_9=0,8_10=1,8_11=1',   # encoders idle
+           RZA1H_DSWAKE_BIT='10',
            RZA1H_ADC_VALS=','.join(adc), RZA1H_RSPI4_FLASH=f'{FW}/dsp.image.bin',
            RZA1H_IC705_EEPROM=a.eeprom)
 if a.behavioral_sub:

@@ -2567,10 +2567,10 @@ index 11f4f4c..aae4d64 100644
          s->fp_input = qemu_input_handler_register(dev, &rza1h_scif3_fp_input_handler);
 diff --git a/qemu-machine/src/stm32l0.c b/qemu-machine/src/stm32l0.c
 new file mode 100644
-index 0000000..f1c7906
+index 0000000..970e247
 --- /dev/null
 +++ b/qemu-machine/src/stm32l0.c
-@@ -0,0 +1,1202 @@
+@@ -0,0 +1,1250 @@
 +/*
 + * STM32L0 (Cortex-M0+) SoC model -- the IC-705 sub-CPU ("ICOM4075S"), IC-705 port.
 + *
@@ -2591,6 +2591,7 @@ index 0000000..f1c7906
 + *   - GPIO: qdev inputs "pa".."ph" (16 each) and outputs "pa-out".."ph-out".
 + *   - ADC channel values: RZA1H_SUB_ADC="v0,v1,..." (12-bit), default mid-scale except the
 + *     key ladders (ch 0/1/14/15 = 0xFFF, no key); QOM "adc" = "ch=val,..." sets them live.
++ *   - QOM "pins" = "C15=0,D2=1" drives GPIO inputs live ("=-1" releases to the pull).
 + *     Conversions honour CFGR1.RES (the firmware uses 10-bit).
 + *   - SPI1: the attached device is not identified; MISO idles 0xFF.
 + * Debug: RZA1H_DEBUG=sub.
@@ -3722,6 +3723,52 @@ index 0000000..f1c7906
 +    return g_string_free(g, false);
 +}
 +
++/* QOM "pins" = "C15=0,D2=1,..." drives input pins live; "=-1" releases the pin
++ * back to its pull-up/pull-down. Reads back every externally driven pin. */
++static void stm32l0_set_pins_prop(Object *obj, const char *str, Error **errp)
++{
++    STM32L0State *s = STM32L0(obj);
++    const char *p = str;
++
++    while (p && *p) {
++        char *e;
++        char port = p[0] & ~0x20;
++        long bit = strtol(p + 1, &e, 10);
++        if (*e != '=' || bit < 0 || bit > 15) {
++            error_setg(errp, "pins: expected <port><bit>=0|1|-1");
++            return;
++        }
++        long v = strtol(e + 1, &e, 0);
++        for (int i = 0; i < NPORT; i++) {
++            if (port_letter[i] != port) {
++                continue;
++            }
++            if (v < 0) {
++                s->ext_driven[i] &= ~(1u << bit);
++                gpio_check_edges(s, i);
++            } else {
++                gpio_in_set(s, i, bit, v != 0);
++            }
++        }
++        p = *e == ',' ? e + 1 : NULL;
++    }
++}
++
++static char *stm32l0_get_pins_prop(Object *obj, Error **errp)
++{
++    STM32L0State *s = STM32L0(obj);
++    GString *g = g_string_new("");
++    for (int i = 0; i < NPORT; i++) {
++        for (int b = 0; b < 16; b++) {
++            if (s->ext_driven[i] & (1u << b)) {
++                g_string_append_printf(g, "%s%c%d=%d", g->len ? "," : "", port_letter[i], b,
++                                       (s->ext_in[i] >> b) & 1);
++            }
++        }
++    }
++    return g_string_free(g, false);
++}
++
 +static void stm32l0_init(Object *obj)
 +{
 +    STM32L0State *s = STM32L0(obj);
@@ -3735,6 +3782,7 @@ index 0000000..f1c7906
 +    s->refclk = qdev_init_clock_in(dev, "refclk", NULL, NULL, 0);
 +
 +    object_property_add_str(obj, "adc", stm32l0_get_adc_prop, stm32l0_set_adc_prop);
++    object_property_add_str(obj, "pins", stm32l0_get_pins_prop, stm32l0_set_pins_prop);
 +    qdev_init_gpio_in_named(dev, gpio_in_a, "pa", 16);
 +    qdev_init_gpio_in_named(dev, gpio_in_b, "pb", 16);
 +    qdev_init_gpio_in_named(dev, gpio_in_c, "pc", 16);

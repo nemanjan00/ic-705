@@ -172,11 +172,22 @@ front-panel bytes +4/+5:
   0x3FF. Live control: `qom-set /machine/adc vals "6=90"` (10-bit; -1 returns the channel
   to `RZA1H_ADC_VALS`).
 - Other ARM ADC channels: ch0 (threshold checks in `0x200198E4`, level mapping in
-  `0x20061618`); ch7 smoothed into the long-press/TX block (+876); ch2/ch3 only in one
+  `0x20061618`); ch7 = **battery voltage** (smoothed into +876; 0 shows LOW BATTERY, 0x300 a red, nearly empty icon, 0x3FF full) [VM]; ch2/ch3 only in one
   power mode.
 
-**Open:** a red "TX" box shows in the status bar on every boot. It stays with ch4/ch5
-released, so it is not that ladder. PTT/TRANSMIT inputs are not identified.
+**PTT [FW]/[VM]:** sub-CPU **PC15**, active low with a pull-up. The sub-CPU's report loop
+(`0x800425C`) puts it in key-word bit 0x8000 (ARM `0x203E1F1D` bit 7), next to the 15 ladder
+keys. Holding it sets the ARM transmit flag (`0x203806F4` bit 6, read by `0x2002F04C` into
+`0x203E1E28`) within one tick, and releasing it clears the flag [VM]. The factory input test
+(`0x20019978`, steps 0..15 from the table at `0x202DA0A6`) checks this bit along with the
+ladder keys. The mic-jack PTT is assumed to be wired to the same line [INF]. Live control:
+`qom-set /machine/subcpu pins "C15=0"` (press), `"C15=-1"` (release to the pull-up).
+- The same loop reports **PC14** and **PD2** in its status byte (+53, bits 0/1). PC14 high
+  sets ARM `0x203E1D97`/`0x203E1DDB`. Their roles are unknown. They are not PTT [VM].
+- **Open:** the screen does not change while the flag is set, even with `--dsp`. The red
+  "TX" box shows in the status bar on every boot and stays with ch4/ch5 released and with
+  full battery, so it is not either of those. Whatever is still missing for transmit is
+  probably DSP/FPGA confirmation [INF].
 
 **Main dial [FW]/[VM]:** MTU2 channel 1 in phase-counting mode 1 (TMDR_1 = 0x04, TSTR CST1),
 10 Hz per count in the default step. The old timer model free-ran TCNT1, which looked like the
@@ -213,7 +224,7 @@ touch UI (SET > Display > System Language) is still English after a fresh QEMU s
   `0x2011862C` (CI-V on the remote jack with IRQ2, `0x20028FFC`, plus another port);
   SCIF4 = byte ring of 0x36C (GPS NMEA likely); SCIF5 = clock-synchronous, silent at boot,
   role open; RSPI0 = DV DSP link; USB0 at 0xE8010000.
-- P0_5 bit-banged single-wire receiver (`0x20118770`, microphone keys likely).
+- P0_5 bit-banged serial line (`0x20118938`): mode 2 receives (`0x20118770`, start bit, 22 ticks per bit, 5 data bits), mode 4 transmits (`0x2011881C`). Codes 27/31 switch FIGS/LTRS, so it is **Baudot (RTTY)**, not the mic keys [FW].
 - Steady-state MMIO census [VM] (3 s trace on the main screen): ARM ADC ch0/1/4/5/6/7 read
   every tick, ch2/ch3 never (gated by bit 5 of config byte `0x20380BD2`, set per power-source
   mode); IRQRR polled every tick (RTC).

@@ -38,6 +38,7 @@ It sets a1=1 (full bring-up) at the power-mode dispatcher `0x2007B7C0`. With
 | RSPI0 SPDR DMA (RX deferred until TX clocked; SPRI suppressed while RX DMA armed) | `dmac.c`, `rspi_gen.c` | DV link `0x201FFF08` |
 | DMAC CHSTAT.END = bit 5 (plus TC bit 6) | `dmac.c`, `dmac_hi.c` | firmware busy-waits on bit 5 |
 | ADC live readings: QOM `/machine/adc` `vals` "ch=value,..." (10-bit) | `adc.c`, `rz_a1h.c` | ARM key ladders on ch4/ch5/ch6 (`0x2008DE40`, `0x2008DBF0`) |
+| Sub-CPU GPIO inputs live: QOM `/machine/subcpu` `pins` "C15=0,..." (`=-1` releases to the pull) | `stm32l0.c` | PTT = PC15 active low (`0x800425C`) |
 | Port-8 encoders (MULTI, AF/RF-SQL, PBT) need no model: driven with `pins` | `gpio.c` (existing) | `0x2008E2F0` samples PPR8 |
 
 Status (2026-11-21, earlier): reaches the RTX idle task with the UI drawn (480x272): TX icon,
