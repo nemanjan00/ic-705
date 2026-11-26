@@ -37,6 +37,9 @@ Tags: [FW] firmware static · [HW] radio · [VM] emulator · [EXT] outside · [I
 
 ## Milestones (newest first)
 
+- **2026-11-26: outside DMR RX found [EXT].** BI1BIF ships receive-only DMR/YSF/P25 by
+  equalizing the stock FM audio on the ARM, with mbelib-neo, no DSP patch and no TX.
+  Compared in `DMR_FEASIBILITY.md`. Our open parts are TX (R3) and our own RX code.
 - **2026-11-23: front panel complete [FW]/[VM].**
   - MULTI (P8_10/11), AF/RF-SQL (P8_8/9) and PBT (P8_0/1) encoders found on port 8.
   - Three ARM-ADC key ladders found (ch4/ch5/ch6; ch6 L1 = V/M).

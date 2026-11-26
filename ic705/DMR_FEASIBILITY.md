@@ -36,6 +36,54 @@ Practical scope: **simplex / hotspot DMR, one timeslot, continuous carrier.**
 True TDMA bursting on a repeater uplink depends on T/R switching speed and is the
 least certain part.
 
+## Outside work: BI1BIF digital-voice RX (2026-11) [EXT]
+
+`github.com/BI1BIF/IC-705-Firmware` ships **receive-only** DMR (clear voice), YSF and P25
+Phase 1 for J140/E140 1.40. Read from its public notes and sources; nothing copied here,
+and none of it checked by us.
+
+- **Input:** the stock FM *audio* at 48 kHz, in 36-sample blocks from the SSIF0 receive
+  queue (the same tap as `ICAP.md`, before ICAP's decimator). A hook replaces the APRS
+  slot copy. **The SHARC is not patched.** Instead the ARM undoes the FM chain in
+  software, with three parallel front ends per call:
+  - raw;
+  - "equalized": a leaky integrator to restore the bass and a lead term to lift the top;
+  - "transition": a differential slicer with fractionally spaced 25-tap equalizers, fit
+    to the sync word's level changes, because those survive the bass cut.
+  An earlier bench used the radio's 12 kHz IF stream instead (SSIF5, the WLAN PCM path).
+- **Decode:** a slicer, sync search, BPTC/Golay/QR/RS FEC and LC, all their own code.
+  **AMBE+2 is mbelib-neo** running on the A9 in a worker thread, loaded from the SD card
+  (`DMRRX.BIN`) into RAM at about `0x20700000`.
+- **Audio out:** the stock SSIF0 DMA callback is replaced. Decoded speech goes in only
+  when native playback is empty, the radio is in receive and the channel hasn't changed.
+- **TX:** none. A guard on the stock TX filter blocks transmit while DMR RX is on, and
+  still lets the mic PTT through. It reads a "wired MIC PTT debounce" byte at
+  `0x203E1E6B` (base `0x203E1B30` + 0x33B). That is a lead for our mic-PTT question
+  (`EMULATION.md`).
+- **Delivery:** the main ARM image is patched. Patches are XOR diffs applied in the
+  browser to the user's own `.dat`.
+
+**Compared with this project:**
+
+| | BI1BIF | here |
+|---|---|---|
+| Status | Field builds RX12–RX17; release notes cite weak-signal fixes | Emulation only; nothing on a radio |
+| RX source | Stock FM audio (SSIF0), equalized on the ARM | Planned: flattened SHARC tables (`FM_AUDIO.md`) or the DV DSP's I2S0 L |
+| Demod/FEC | Done on the ARM | Not written (R6) |
+| AMBE+2 (R1) | Decode done (mbelib-neo, GPL) | Open |
+| TX (R2/R3) | None; actively blocked | 4FSK modulator in the DV DSP proven [VM]; deviation (R3) open |
+| DSP patching | None | DV DSP patch + re-seal (R7) [VM] |
+
+**What it means for us [INF]:**
+- **RX is ARM-only work.** Equalized stock FM audio is good enough for DMR, so the
+  SHARC flat patch is optional for RX. It would still remove the need for their
+  equalizers and should help weak signals, because the CTCSS high-pass and de-emphasis
+  throw away symbol energy that software then has to rebuild.
+- **TX is still open, here and there.** Our DV DSP modulator plus R3 is the part nobody
+  has done.
+- **Licensing:** their decoder links GPL code (mbelib-neo, dsd-neo), and their own
+  patches carry no-resale terms. Use only the facts; do not import their code.
+
 ## What DMR needs (ETSI TS 102 361) vs D-STAR
 
 | | D-STAR (present) | DMR (needed) |
